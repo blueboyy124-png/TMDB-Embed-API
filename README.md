@@ -78,10 +78,10 @@ npm start
 # node apiServer.js
 
 # 4. Open the Admin UI (login page) in browser
-http://localhost:8787/
+http://192.168.86.75:8787/
 
 # 5. Health check
-curl http://localhost:8787/api/health
+curl http://192.168.86.75:8787/api/health
 ```
 
 ---

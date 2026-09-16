@@ -171,7 +171,7 @@ All notable changes to this project will be documented in this file.
 - Server now binds to `0.0.0.0` by default so Docker port publishing works correctly from the host. Added `BIND_HOST=0.0.0.0` in Dockerfile and compose.
 
 ### Notes
-- If you were seeing `ERR_CONNECTION_REFUSED` on `http://localhost:8787`, pull the latest image or rebuild, then re-run with `-p 8787:8787`.
+- If you were seeing `ERR_CONNECTION_REFUSED` on `http://192.168.86.75:8787`, pull the latest image or rebuild, then re-run with `-p 8787:8787`.
 
 ## [1.0.2] - 2025-09-17
 

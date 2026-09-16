@@ -123,45 +123,74 @@ function validateUrl(url) {
 }
 
 function makeRequest(url, options = {}) {
-    return new Promise((resolve, reject) => {
-        const urlObj = new URL(url);
-        const isHttps = urlObj.protocol === 'https:';
-        const httpModule = isHttps ? https : http;
+    const maxRedirects = options.maxRedirects || 5;
+    let redirectCount = 0;
 
-        const requestOptions = {
-            hostname: urlObj.hostname,
-            port: urlObj.port || (isHttps ? 443 : 80),
-            path: urlObj.pathname + urlObj.search,
-            method: options.method || 'GET',
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                ...options.headers
-            },
-            timeout: 30000
-        };
+    const doRequest = (currentUrl) => {
+        return new Promise((resolve, reject) => {
+            const urlObj = new URL(currentUrl);
+            const isHttps = urlObj.protocol === 'https:';
+            const httpModule = isHttps ? https : http;
 
-        const req = httpModule.request(requestOptions, (res) => {
-            if (options.allowRedirects === false && (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303 || res.statusCode === 307 || res.statusCode === 308)) {
-                resolve({ statusCode: res.statusCode, headers: res.headers });
-                return;
-            }
+            const requestOptions = {
+                hostname: urlObj.hostname,
+                port: urlObj.port || (isHttps ? 443 : 80),
+                path: urlObj.pathname + urlObj.search,
+                method: options.method || 'GET',
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    ...options.headers
+                },
+                timeout: 30000
+            };
 
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                if (options.parseHTML && data) {
-                    const $ = cheerio.load(data);
-                    resolve({ $: $, body: data, statusCode: res.statusCode, headers: res.headers });
-                } else {
-                    resolve({ body: data, statusCode: res.statusCode, headers: res.headers });
+            const req = httpModule.request(requestOptions, (res) => {
+                const isRedirect = [301, 302, 303, 307, 308].includes(res.statusCode);
+
+                // Allow callers to opt out of automatic redirect following
+                if (options.allowRedirects === false && isRedirect) {
+                    resolve({ statusCode: res.statusCode, headers: res.headers });
+                    return;
                 }
-            });
-        });
 
-        req.on('error', reject);
-        req.on('timeout', () => reject(new Error('Request timeout')));
-        req.end();
-    });
+                // Follow redirects automatically (fixes hubcloud.ist -> hubcloud.cx etc.)
+                if (isRedirect && redirectCount < maxRedirects) {
+                    res.resume(); // Drain the response body
+                    const location = res.headers['location'];
+                    if (location) {
+                        redirectCount++;
+                        let redirectUrl;
+                        try {
+                            redirectUrl = new URL(location, currentUrl).toString();
+                        } catch (e) {
+                            reject(new Error(`Invalid redirect URL: ${location}`));
+                            return;
+                        }
+                        console.log(`[makeRequest] Following redirect ${redirectCount}/${maxRedirects}: ${redirectUrl}`);
+                        doRequest(redirectUrl).then(resolve).catch(reject);
+                        return;
+                    }
+                }
+
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    if (options.parseHTML && data) {
+                        const $ = cheerio.load(data);
+                        resolve({ $: $, body: data, statusCode: res.statusCode, headers: res.headers });
+                    } else {
+                        resolve({ body: data, statusCode: res.statusCode, headers: res.headers });
+                    }
+                });
+            });
+
+            req.on('error', reject);
+            req.on('timeout', () => reject(new Error('Request timeout')));
+            req.end();
+        });
+    };
+
+    return doRequest(url);
 }
 
 // Helper function to decode URL-encoded filenames and make them human-readable
@@ -740,7 +769,7 @@ function extractHubCloudLinks(url, referer) {
             const promises = downloadButtons.get().map((button, index) => {
                 return new Promise((resolve) => {
                     const $button = $(button);
-                    const link = $button.attr('href');
+                    let link = $button.attr('href');
                     const text = $button.text();
 
                     console.log(`[4KHDHub] Processing button ${index + 1}: "${text}" -> ${link}`);
@@ -749,6 +778,23 @@ function extractHubCloudLinks(url, referer) {
                         console.log(`[4KHDHub] Button ${index + 1} has no link`);
                         resolve(null);
                         return;
+                    }
+
+                    // Check for JS href override (e.g., PixelServer sets link via `var pxl = "..."`)
+                    const buttonId = $button.attr('id');
+                    if (buttonId) {
+                        const overrideScript = $('script')
+                            .map((i, el) => $(el).text())
+                            .get()
+                            .find(text => text.includes(`getElementById("${buttonId}")`) || text.includes(`getElementById('${buttonId}')`));
+                        if (overrideScript) {
+                            const pxlMatch = overrideScript.match(/var\s+pxl\s*=\s*["']([^"']+)["']/);
+                            if (pxlMatch && pxlMatch[1]) {
+                                const overriddenLink = pxlMatch[1].trim();
+                                console.log(`[4KHDHub] Button ${index + 1} link overridden by JS: ${link} -> ${overriddenLink}`);
+                                link = overriddenLink;
+                            }
+                        }
                     }
 
                     const buttonBaseUrl = getBaseUrl(link);
@@ -904,12 +950,13 @@ function extractHubCloudLinks(url, referer) {
                     } else if (link.includes('pixeldra')) {
                         console.log(`[4KHDHub] Button ${index + 1} is Pixeldrain`);
 
-                        // Convert pixeldrain.net/u/ID format to pixeldrain.net/api/file/ID format
+                        // Convert pixeldrain.net/u/ID or pixeldrain.dev/u/ID format to pixeldrain API format
                         let convertedLink = link;
-                        const pixeldrainMatch = link.match(/pixeldrain\.net\/u\/([a-zA-Z0-9]+)/);
+                        const pixeldrainMatch = link.match(/pixeldrain\.(?:net|dev)\/u\/([a-zA-Z0-9]+)/);
                         if (pixeldrainMatch) {
                             const fileId = pixeldrainMatch[1];
-                            convertedLink = `https://pixeldrain.net/api/file/${fileId}`;
+                            const pixeldrainDomain = link.includes('pixeldrain.dev') ? 'pixeldrain.dev' : 'pixeldrain.net';
+                            convertedLink = `https://${pixeldrainDomain}/api/file/${fileId}`;
                             console.log(`[4KHDHub] Converted Pixeldrain URL from ${link} to ${convertedLink}`);
                         }
 
@@ -994,16 +1041,32 @@ function extractHubCloudLinks(url, referer) {
                                 allowRedirects: false
                             })
                                 .then(response => {
-                                    const redirectUrl = response.headers['location'];
-                                    if (!redirectUrl) {
+                                    const locationHeader = response.headers['location'];
+                                    if (!locationHeader) {
                                         throw new Error('No redirect found');
+                                    }
+
+                                    // Resolve relative redirects
+                                    let redirectUrl;
+                                    try {
+                                        redirectUrl = new URL(locationHeader, currentLink).toString();
+                                    } catch (e) {
+                                        throw new Error('Invalid redirect URL');
                                     }
 
                                     console.log(`[4KHDHub] 10Gbps redirect: ${redirectUrl}`);
 
-                                    if (redirectUrl.includes('id=')) {
+                                    // Check if this redirect contains the final direct video link
+                                    if (redirectUrl.includes('link=')) {
                                         // Final redirect, extract the link parameter
-                                        const finalLink = redirectUrl.split('link=')[1];
+                                        let finalLink;
+                                        try {
+                                            finalLink = new URL(redirectUrl).searchParams.get('link');
+                                        } catch (e) {
+                                            // Fallback to manual parsing
+                                            finalLink = decodeURIComponent(redirectUrl.split('link=')[1] || '');
+                                        }
+
                                         if (finalLink) {
                                             console.log(`[4KHDHub] 10Gbps final link: ${finalLink}`);
                                             const decodedUrl = decodeURIComponent(finalLink);

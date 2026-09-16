@@ -1,12 +1,16 @@
 {
   "defaultProviders": [],
   "configVersion": 1,
-  "tmdbApiKeys": [],
+  "tmdbApiKeys": [
+    "e0554f6521da4365d4a36ea7ff17ae51"
+  ],
   "enableShowboxProvider": true,
-  "febboxCookies": [],
+  "febboxCookies": [
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3ODQ0ODY2MzUsIm5iZiI6MTc4NDQ4NjYzNSwiZXhwIjoxODE1NTkwNjU1LCJkYXRhIjp7InVpZCI6MjE5NDUyNCwidG9rZW4iOiI5OTFmYzU5NmExODlhNjQyODI5MjZhZTA2ZGVkMWZkOCJ9fQ.Xvrf5_dUSbbXyRGPC9wE_7A82NRJo5omJ7X2H267r8s"
+  ],
   "enable4khdhubProvider": true,
   "enableVixsrcProvider": true,
-  "enableProxy": false,
+  "enableProxy": true,
   "disableCache": false,
   "enablePStreamApi": true,
   "disableUrlValidation": false,
@@ -17,5 +21,8 @@
   "enableVidlinkProvider": true,
   "enableVideasyProvider": true,
   "enableLordflixProvider": true,
-  "enableNotorrentProvider": true
+  "enableNotorrentProvider": true,
+  "enableDahmermoviesProvider": true,
+  "port": 8787,
+  "defaultRegion": "USA7"
 }

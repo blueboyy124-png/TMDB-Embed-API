@@ -54,6 +54,6 @@ LABEL org.opencontainers.image.title="TMDB Embed API" \
     org.opencontainers.image.licenses="MIT"
 
 # Healthcheck (simple)
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD wget -qO- http://localhost:${API_PORT:-8787}/api/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD wget -qO- http://192.168.86.75:${API_PORT:-8787}/api/health || exit 1
 
 CMD ["node","apiServer.js"]

@@ -120,21 +120,42 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers) {
     for (const line of lines) {
         if (line.startsWith('#')) {
             if (line.startsWith('#EXT-X-KEY:')) {
-                const regex = /https?:\/\/[^""\s]+/g; const keyUrl = regex.exec(line)?.[0];
-                if (keyUrl) {
-                    const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
-                    out.push(line.replace(keyUrl, proxyUrl));
-                    if (!isCacheDisabled()) prefetchSegment(keyUrl, headers);
-                } else out.push(line);
+                const uriMatch = line.match(/URI=["']([^"']+)["']/);
+                if (uriMatch) {
+                    try {
+                        const rawKeyUrl = uriMatch[1];
+                        // Safely resolve relative key paths against the master playlist URL
+                        const absKeyUrl = new URL(rawKeyUrl, targetUrl).href;
+                        const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(absKeyUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
+                        out.push(line.replace(rawKeyUrl, proxyUrl));
+                        if (!isCacheDisabled()) prefetchSegment(absKeyUrl, headers);
+                    } catch {
+                        out.push(line);
+                    }
+                } else {
+                    out.push(line);
+                }
             } else if (line.startsWith('#EXT-X-MEDIA:') || line.startsWith('#EXT-X-I-FRAME-STREAM-INF:')) {
-                const uriMatch = line.match(/URI="([^"]+)"/);
+                let mediaLine = line;
+                // Prioritize the English audio track: force it DEFAULT/AUTOSELECT and
+                // demote all other audio tracks so players auto-load English first.
+                if (mediaLine.startsWith('#EXT-X-MEDIA:') && /TYPE=AUDIO/i.test(mediaLine)) {
+                    const isEnglish = /LANGUAGE=["']en(-[a-z]{2})?["']/i.test(mediaLine) || /NAME=["'](English|Eng)["']/i.test(mediaLine);
+                    if (isEnglish) {
+                        mediaLine = /DEFAULT=/i.test(mediaLine) ? mediaLine.replace(/DEFAULT=(YES|NO)/i, 'DEFAULT=YES') : mediaLine + ',DEFAULT=YES';
+                        mediaLine = /AUTOSELECT=/i.test(mediaLine) ? mediaLine.replace(/AUTOSELECT=(YES|NO)/i, 'AUTOSELECT=YES') : mediaLine + ',AUTOSELECT=YES';
+                    } else {
+                        mediaLine = /DEFAULT=/i.test(mediaLine) ? mediaLine.replace(/DEFAULT=(YES|NO)/i, 'DEFAULT=NO') : mediaLine + ',DEFAULT=NO';
+                    }
+                }
+                const uriMatch = mediaLine.match(/URI="([^"]+)"/);
                 if (uriMatch) {
                     try {
                         const mediaUrl = new URL(uriMatch[1], targetUrl).href;
                         const proxyUrl = `${baseProxyUrl}/m3u8-proxy?url=${encodeURIComponent(mediaUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
-                        out.push(line.replace(uriMatch[1], proxyUrl));
-                    } catch { out.push(line); }
-                } else out.push(line);
+                        out.push(mediaLine.replace(uriMatch[1], proxyUrl));
+                    } catch { out.push(mediaLine); }
+                } else out.push(mediaLine);
             } else out.push(line);
         } else if (line.trim()) {
             try {
@@ -157,7 +178,18 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers) {
 function createProxyRoutes(app) {
     // m3u8 playlist proxy
     app.get('/m3u8-proxy', cors(), async (req, res) => {
-        const targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'URL parameter required' });
+        let targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'URL parameter required' });
+
+        // Robust absolute URL enforcement
+        if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+            if (targetUrl.startsWith('//')) {
+                targetUrl = 'https:' + targetUrl;
+            } else {
+                const leadingSlash = targetUrl.startsWith('/') ? '' : '/';
+                targetUrl = `https://showbox.media${leadingSlash}${targetUrl}`;
+            }
+        }
+
         let headers = {};
         try { headers = JSON.parse(req.query.headers || '{}'); } catch {
             // Ignore URL parsing errors
@@ -177,23 +209,39 @@ function createProxyRoutes(app) {
     });
 
     // ts / key segment proxy
-    app.get('/ts-proxy', cors(), async (req, res) => {
-        const targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'URL parameter required' });
+    app.get('/ts-proxy', async (req, res) => {
+        let targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'URL parameter required' });
+
+        // Robust absolute URL enforcement
+        if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+            if (targetUrl.startsWith('//')) {
+                targetUrl = 'https:' + targetUrl;
+            } else {
+                const leadingSlash = targetUrl.startsWith('/') ? '' : '/';
+                targetUrl = `https://showbox.media${leadingSlash}${targetUrl}`;
+            }
+        }
+
         const debug = req.query.debug === '1';
         const noSynth = req.query.noSynth === '1';
         const force200 = req.query.force200 === '1';
-        const clampOpen = req.query.clampOpen !== '0';
-        const progressiveOpen = req.query.progressiveOpen !== '0';
+        // Find these lines inside app.get('/ts-proxy', ...):
+const clampOpen = req.query.clampOpen === '1';             // Changed default from !== '0' to === '1'
+const progressiveOpen = req.query.progressiveOpen === '1'; // Changed default from !== '0' to === '1'
         const tailPrefetchEnabled = req.query.tailPrefetch !== '0';
         let tailPrefetchKB = parseInt(req.query.tailPrefetchKB || '256', 10);
         if (isNaN(tailPrefetchKB) || tailPrefetchKB < 64) tailPrefetchKB = 256;
         if (tailPrefetchKB > 2048) tailPrefetchKB = 2048; // max 2MB tail window
-        let openChunkKB = parseInt(req.query.openChunkKB || '4096', 10);
-        if (isNaN(openChunkKB) || openChunkKB < 64) openChunkKB = 4096;
-        if (openChunkKB > 16384) openChunkKB = 16384; // cap at 16MB
-        let initChunkKB = parseInt(req.query.initChunkKB || '512', 10);
-        if (isNaN(initChunkKB) || initChunkKB < 64) initChunkKB = 512;
-        if (initChunkKB > 2048) initChunkKB = 2048; // hard cap 2MB
+        // A balanced 8MB chunk is large enough for HD/4K quality, 
+// but small enough to download quickly without timing out.
+let openChunkKB = parseInt(req.query.openChunkKB || '8192', 10);
+if (isNaN(openChunkKB) || openChunkKB < 64) openChunkKB = 8192;
+if (openChunkKB > 16384) openChunkKB = 16384; 
+
+// Initial chunk back to 2MB so playback starts instantly
+let initChunkKB = parseInt(req.query.initChunkKB || '2048', 10);
+if (isNaN(initChunkKB) || initChunkKB < 64) initChunkKB = 2048;
+if (initChunkKB > 4096) initChunkKB = 4096;
         let headers = {}; try { headers = JSON.parse(req.query.headers || '{}'); } catch {
             // Ignore URL parsing errors
         }
@@ -410,8 +458,20 @@ function createProxyRoutes(app) {
     });
 
     // subtitle proxy
-    app.get('/sub-proxy', cors(), async (req, res) => {
-        const targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'url parameter required' });
+    // subtitle proxy
+    app.get('/sub-proxy', cors(), async (react, res) => {
+        let targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'url parameter required' });
+
+        // Robust absolute URL enforcement
+        if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+            if (targetUrl.startsWith('//')) {
+                targetUrl = 'https:' + targetUrl;
+            } else {
+                const leadingSlash = targetUrl.startsWith('/') ? '' : '/';
+                targetUrl = `https://showbox.media${leadingSlash}${targetUrl}`;
+            }
+        }
+
         let headers = {}; try { headers = JSON.parse(req.query.headers || '{}'); } catch {
             // Ignore URL parsing errors
         }
@@ -426,11 +486,34 @@ function createProxyRoutes(app) {
     });
 }
 
+// Helper utility to keep maps bounded
+function setBoundedMap(map, key, value, maxEntries = 100) {
+    if (map.size >= maxEntries) {
+        const oldestKey = map.keys().next().value;
+        map.delete(oldestKey);
+    }
+    map.set(key, value);
+}
+
 function processStreamsForProxy(streams, serverUrl) {
     if (!Array.isArray(streams)) return streams;
+    
     return streams.map(s => {
         if (!s || !s.url || typeof s.url !== 'string') return s;
         const original = extractOriginalUrl(s.url);
+        
+        // --- NEW: Check if the video is "heavy" (4K or 2K) ---
+        // Combine fields to hunt for quality tags
+        const metadata = `${s.quality || ''} ${s.resolution || ''} ${s.name || ''} ${s.title || ''}`.toLowerCase();
+        const isHeavy = metadata.includes('2160') || metadata.includes('4k') || metadata.includes('1440') || metadata.includes('2k');
+        
+        // If it's heavy, bypass the proxy entirely. Give the client the direct URL.
+        if (isHeavy) {
+            console.log(`[Proxy Bypass] Skipping proxy for heavy video: ${original}`);
+            return { ...s, url: original }; 
+        }
+        // -----------------------------------------------------
+
         const headers = s.headers || {};
         const hParam = Object.keys(headers).length ? `&headers=${encodeURIComponent(JSON.stringify(headers))}` : '';
         let host = '';
@@ -439,12 +522,14 @@ function processStreamsForProxy(streams, serverUrl) {
         } catch {
             // Ignore errors
         }
-        // Force specific hosts through ts-proxy (direct file style) even without extension
+        
+        const noClamp = '&progressiveOpen=0&clampOpen=0';
+
         if (host.includes('pixeldrain.') || host === 'video-downloads.googleusercontent.com') {
-            return { ...s, url: `${serverUrl}/ts-proxy?url=${encodeURIComponent(original)}${hParam}` };
+            return { ...s, url: `${serverUrl}/ts-proxy?url=${encodeURIComponent(original)}${hParam}${noClamp}` };
         }
         if (/\.(mp4|mkv)(\?|$)/i.test(original)) {
-            return { ...s, url: `${serverUrl}/ts-proxy?url=${encodeURIComponent(original)}${hParam}` };
+            return { ...s, url: `${serverUrl}/ts-proxy?url=${encodeURIComponent(original)}${hParam}${noClamp}` };
         }
         return { ...s, url: `${serverUrl}/m3u8-proxy?url=${encodeURIComponent(original)}${hParam}` };
     });

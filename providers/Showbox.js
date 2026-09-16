@@ -1,5 +1,28 @@
 require('dotenv').config();
 console.log(`Current DISABLE_CACHE value: '${process.env.DISABLE_CACHE}' (Type: ${typeof process.env.DISABLE_CACHE})`);
+
+// --- Tolerant console.time/timeEnd ---
+// Node's console.time doesn't support concurrent calls with the same label.
+// Showbox.js fires many parallel requests that share identical labels (e.g.
+// getStreamsFromTmdbId_total_tv_79744_s2_e16), which triggers "Label already
+// exists" warnings and "No such label" errors. This override makes both calls
+// idempotent so concurrent timers don't spam the console.
+const _timeStore = new Map();
+const _origTime = console.time.bind(console);
+const _origTimeEnd = console.timeEnd.bind(console);
+console.time = (label) => {
+  if (!_timeStore.has(label)) {
+    _timeStore.set(label, Date.now());
+    _origTime(label);
+  }
+};
+console.timeEnd = (label) => {
+  if (_timeStore.has(label)) {
+    _timeStore.delete(label);
+    _origTimeEnd(label);
+  }
+};
+
 const axios = require('axios');
 const cheerio = require('cheerio');
 const fs = require('fs').promises;
@@ -2733,6 +2756,12 @@ ensureCacheDir(CACHE_DIR).catch(console.error);
 const PSTREAM_API_BASE_URL = 'https://fed-api.pstream.mov';
 const PSTREAM_ACCEPT_HEADER = 'pstream.org';
 
+// Short DNS-failure cache: if the PStream domain can't resolve, skip it for
+// 30 seconds instead of hammering DNS on every request and spamming errors.
+const PSTREAM_DNS_FAILURE_TTL_MS = 30 * 1000;
+let pstreamDnsFailureUntil = 0;
+let pstreamDnsFailureLogged = false;
+
 // Region mapping for PStream API (FebBox regions -> PStream regions)
 const PSTREAM_REGION_MAPPING = {
     // US Regions
@@ -2783,6 +2812,17 @@ const mapRegionForPStream = (febboxRegion) => {
 const getStreamsFromPStreamAPI = async (imdbId, tmdbType, seasonNum = null, episodeNum = null, regionPreference = null, userCookie = null) => {
     const timerLabel = `getStreamsFromPStreamAPI_${imdbId}_${tmdbType}` + (seasonNum ? `_s${seasonNum}` : '') + (episodeNum ? `_e${episodeNum}` : '');
     console.time(timerLabel);
+
+    // If the PStream domain recently failed DNS resolution, skip the call
+    // entirely and fall through to FebBox without spamming the console.
+    if (Date.now() < pstreamDnsFailureUntil) {
+      if (!pstreamDnsFailureLogged) {
+        console.log(`[PStream] Skipping PStream API (DNS failure cached for ${Math.ceil((pstreamDnsFailureUntil - Date.now()) / 1000)}s)`);
+        pstreamDnsFailureLogged = true;
+      }
+      console.timeEnd(timerLabel);
+      return [];
+    }
 
     try {
         // Build the PStream API URL
@@ -2850,9 +2890,17 @@ const getStreamsFromPStreamAPI = async (imdbId, tmdbType, seasonNum = null, epis
         return streams;
 
     } catch (error) {
-        console.error(`[PStream] Error fetching streams: ${error.message}`);
-        if (error.response) {
+        // If DNS resolution fails (ENOTFOUND), cache the failure so we don't
+        // hammer the dead domain on every request for the next 30 seconds.
+        if (error && (error.code === 'ENOTFOUND' || error.message?.includes('ENOTFOUND'))) {
+          pstreamDnsFailureUntil = Date.now() + PSTREAM_DNS_FAILURE_TTL_MS;
+          pstreamDnsFailureLogged = false;
+          console.error(`[PStream] DNS failure for ${PSTREAM_API_BASE_URL} — skipping PStream for ${PSTREAM_DNS_FAILURE_TTL_MS / 1000}s`);
+        } else {
+          console.error(`[PStream] Error fetching streams: ${error.message}`);
+          if (error.response) {
             console.error(`[PStream] Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data).substring(0, 200)}`);
+          }
         }
         console.timeEnd(timerLabel);
         return [];
