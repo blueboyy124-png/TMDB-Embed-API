@@ -48,6 +48,13 @@
           </div>
           <div class="status-block">
             <h2>Providers</h2>
+            <div class="field" style="margin-bottom:.75rem;">
+              <label>Provider check TMDB ID<p class="hint">Title used by "Run Provider Functional Checks" (e.g. 278 = Shawshank Redemption).</p></label>
+              <div style="display:flex; align-items:center; gap:.5rem;">
+                <input type="text" id="providerCheckTmdbId" placeholder="278" style="width:7rem;" />
+                <button id="saveProviderCheckTmdbBtn" type="button">Save</button>
+              </div>
+            </div>
             <button style="margin-bottom: 1rem;" id="runProviderChecksBtn" type="button">Run Provider Functional Checks</button>
             <span style="margin-left: .5rem; margin-bottom: 1rem;" id="providerCheckSummary" class="hint"></span>
             <div id="statusProvidersEnhanced" class="providers-table" aria-live="polite"></div>

@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-08-19
+
+### Added
+- **7 new providers ported from the Infinite-streams v5.0.0 Stremio addon** (CommonJS ports, registered in `providers/registry.js`):
+  - `streamflix` - StreamFlix direct MP4 links (30-min `data.json` cache + Firebase episode lookup).
+  - `vaplayer` - VaPlayer HLS streams resolved by IMDb ID.
+  - `castletv` - CastleTV streams via AES-128-CBC encrypted API (`api.hlowb.com`), per-track + shared fallback, subtitle support.
+  - `hdghartv` - HDGharTV title search with fuzzy match + IMDb ID verification, quality-sorted links.
+  - `netmirror` - Netflix direct (embed-tmdb) plus NewTV platform fallback (Netflix/Prime Video/Hotstar/Disney) with rotating discovery domains.
+  - `onetouchtv` - OneTouchTV streams via AES-256-CBC custom-base64 API (title/season matching + IMDb verification + absolute-episode resolution).
+  - `zxcstreams` - ZXCStreams multi-server backend (icarus/berkas/orion/athena) with dynamic domain discovery and shared-token flow.
+- **New shared utilities**: `utils/titleMatch.js` (fuzzy title matching port), `utils/tmdbTitleToImdb.js` (TMDB title→IMDb resolution with cache), `utils/cinemetaEpisodes.js` (episode counts per season).
+- **Configurable provider-check TMDB ID**: the title used by dashboard functional checks is now editable in the Server Status panel (default `278`, env `PROVIDER_CHECK_TMDB_ID`). Persisted via `POST /api/config`, reset via Clear All, and exposed through `/api/status` as `providerCheckTmdbId`.
+
+### Fixed
+- **Vidlink provider**: Rewritten for the new API format — parses `stream.qualities` into one stream per quality (best-first), no longer relies on the removed HLS proxy format. Requires a working CDN (some CDNs 429 server-side requests from blocked IPs; browsers play direct URLs fine).
+- **`utils/tmdb.js`**: Now reads the TMDB API key via `utils/tmdbKey` (normalized `tmdbApiKeys`) instead of the deleted legacy `config.tmdbApiKey` field, so `getDetails`/`resolveImdbId` work with the current config schema.
+- **castletv quality parsing**: Quality is now parsed from `resolutionDescription` (SD 480P / HD 720P / FHD 1080P); streams are deduped per URL keeping the highest resolution (eliminates the "2024p" year-match bug).
+- **docker-compose.yml**: Fixed broken YAML indentation on the `BIND_HOST` environment entry that prevented `docker compose up` from parsing.
+
+### Changed
+- Version bumped to **1.3.0** across `package.json` and `package-lock.json`.
+- `.env.example` refreshed to the current schema (`API_PORT` instead of legacy `PORT`, placeholder TMDB key, documented multi-key JSON array).
+
+### Documentation
+- **README fully rewritten** to match the current project state: 13-provider list, accurate authentication docs (`utils/auth-users.json`, default `admin` / `change-me`), corrected environment variable table, complete endpoint + proxy route reference, plugin example mirroring the real `providerFunctionMap`, and a new "Server Status & Functional Checks" section.
+
+---
+
+## [1.2.0] - 2026-08-19
+
+### Removed
+- **LordFlix provider**: Permanently removed — upstream API `snowhouse.lordflix.club` (and `lordflix.org`) no longer resolves in DNS. `enc-dec.app` is a passthrough signer and returns signed URLs for the dead host; no compatible successor API exists (`lordflix.gd` / `lordflix.app` are unrelated clones using TMDB-ID + iframe embeds, not the snowhouse API).
+- **NoTorrent provider**: Permanently removed — taken down by its developer; the Stremio addon API bridge (`addon-osvh.onrender.com`) is no longer available.
+
+---
+
 ## [1.1.1] - 2026-05-29
 
 ### Removed
@@ -16,7 +53,7 @@ All notable changes to this project will be documented in this file.
 
 ## [1.1.0] - 2026-05-16
 
-## Dependency Security
+### Dependency Security
 - **npm vulnerabilities fixed**: Upgraded `cheerio` (1.0.0 → 1.2.0) and `axios-cookiejar-support` (6.0.2 → 7.0.0) to eliminate 14 vulnerabilities (including `undici <=6.23.0` high/critical CVEs). Result: 0 vulnerabilities.
 
 ### Added
@@ -60,6 +97,8 @@ All notable changes to this project will be documented in this file.
 - **uhdmovies provider**: Fixed domain to use `uhdmovies.rip` instead of outdated `uhdmovies.mov`. Added automatic domain replacement for stale scraped URLs. Created new `utils/linkResolver.js` utility to handle driveseed/driveleech download button extraction (supports Instant Download, Resume Cloud, Resume Worker Bot, Direct Links CF Type 1).
 - **Provider registry**: Fixed `listProviders()` to return all available providers with their enabled status, not just enabled ones. Config panel now shows all 6 providers correctly.
 
+---
+
 ## [1.0.8] - 2025-10-03
 
 ### Added
@@ -78,6 +117,8 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - Aggregated responses now obey the proxy flag without client changes—streams returned from `/api/streams/...` are proxy-wrapped and omit upstream header hints when `enableProxy` is active.
 
+---
+
 ## [1.0.7] - 2025-09-21
 
 ### Added
@@ -93,54 +134,52 @@ All notable changes to this project will be documented in this file.
 - Eliminated edge cases where encoded VidZee tokens were leaking through without decoding.
 - Reduced VLC initial loop behavior via tail prefetch serving last-byte probes from cache faster (combined with earlier 1.0.6 range logic).
 
-### Documentation
-- README: implicit improvements carried forward (no separate section required) plus badge bump.
-- CHANGELOG: recorded AES decoder details & tail prefetch instrumentation.
-
 ### Notes
 - Future proxy tuning items (size meta map, dynamic progressive growth) tracked but not part of this release.
 
+---
 
 ## [1.0.6] - 2025-09-20
 
 ### Removed
 - MoviesClub provider (multi-server scraping complexities & Turnstile challenge; deprecated permanently)
 - Xprime provider (upstream Xprime.tv offline due to security changes)
- - 4khdhub provider: all `.zip` archive links are now omitted entirely (previous releases experimented with stripping the extension which produced non‑playable pseudo‑MKV links)
+- 4khdhub provider: all `.zip` archive links are now omitted entirely (previous releases experimented with stripping the extension which produced non-playable pseudo-MKV links)
 
 ### Added
 - Structured multi-server debug instrumentation (session summaries, per-fetch metrics, pattern counters)
 - Turnstile challenge detection & bypass attempt scaffold (synthetic `/rcp_verify` token posting)
 - Optional internal stream proxy (`enableProxy` flag): mounts `/m3u8-proxy`, `/ts-proxy`, `/sub-proxy` with playlist + segment + subtitle handling and segment prefetch cache.
- - Proxy range management features:
-   - `clampOpen` (default on) – caps ambiguous open‑ended `bytes=0-` requests to a bounded initial window (`openChunkKB`, default 4096 KB)
-   - `progressiveOpen` (default on) – incremental expansion of the head range on successive `bytes=0-` requests instead of a single huge span
-   - `initChunkKB` (default 512 KB) – size of the synthetic initial 206 response when neither clamp/progressive produce a range and `noSynth` is not set
-   - `tailPrefetch` (default on) + `tailPrefetchKB` (default 256 KB) – asynchronous fetch & in‑memory cache of the file tail to satisfy rapid VLC tail probes
-   - `force200` (opt‑in) – normalizes upstream 206 responses to 200 for diagnostics
-   - `noSynth` (opt‑in) – disables synthetic initial partial response generation
- - Tail prefetch TTL cleanup task (30 min window) and in‑memory maps for: segment cache, open range clamp, progressive growth, and tail buffers
- - Host routing overrides: `pixeldrain.*` & `video-downloads.googleusercontent.com` are forced through `/ts-proxy` (extensionless or ambiguous content)
+- Proxy range management features:
+  - `clampOpen` (default on) – caps ambiguous open-ended `bytes=0-` requests to a bounded initial window (`openChunkKB`, default 4096 KB)
+  - `progressiveOpen` (default on) – incremental expansion of the head range on successive `bytes=0-` requests instead of a single huge span
+  - `initChunkKB` (default 512 KB) – size of the synthetic initial 206 response when neither clamp/progressive produce a range and `noSynth` is not set
+  - `tailPrefetch` (default on) + `tailPrefetchKB` (default 256 KB) – asynchronous fetch & in-memory cache of the file tail to satisfy rapid VLC tail probes
+  - `force200` (opt-in) – normalizes upstream 206 responses to 200 for diagnostics
+  - `noSynth` (opt-in) – disables synthetic initial partial response generation
+- Tail prefetch TTL cleanup task (30 min window) and in-memory maps for: segment cache, open range clamp, progressive growth, and tail buffers
+- Host routing overrides: `pixeldrain.*` & `video-downloads.googleusercontent.com` are forced through `/ts-proxy` (extensionless or ambiguous content)
 
 ### Changed
 - Centralized multi-server request headers with realistic `sec-ch-ua*` & `Sec-Fetch-*` values
 - Added retry, rotating User-Agent, and cookie jar logic to multi-server fetch pipeline
 - Showbox provider priority map updated after Xprime removal
 - README/Docs trimmed to reflect current active providers only
-- When `enableProxy` is active, stream response objects have their original `headers` field removed (proxy handles all required headers internally).
- - 4khdhub provider now filters out archive endpoints instead of attempting extension normalization (prevents feeding ZIP files to players)
- - Open‑ended range handling improved to reduce VLC negotiation loops by throttling first‑pass read size and growing progressively
- - Synthetic initial partial response is automatically suppressed when `progressiveOpen` is active (real range growth preferred)
+- When `enableProxy` is active, stream response objects have their original `headers` field removed (proxy handles all required headers internally)
+- 4khdhub provider now filters out archive endpoints instead of attempting extension normalization (prevents feeding ZIP files to players)
+- Open-ended range handling improved to reduce VLC negotiation loops by throttling first-pass read size and growing progressively
+- Synthetic initial partial response is automatically suppressed when `progressiveOpen` is active (real range growth preferred)
 
 ### Fixed
 - Ensured multi-server fallback attempts (direct rcp player/m3u8 extraction) operate with improved diagnostics
- - Eliminated repeated VLC tail probe stalls caused by archive masquerading as video content (root cause was filtered by dropping `.zip` URLs)
+- Eliminated repeated VLC tail probe stalls caused by archive masquerading as video content (root cause was filtered by dropping `.zip` URLs)
 
 ### Documentation
- - Updated README version badge to 1.0.6 and provider list (removed MoviesClub & Xprime, clarified active providers list)
- - Added proxy tuning parameter reference (clamp/progressive/tail prefetch, synthetic partial, force200) and host override notes
- - Expanded explanation that per‑stream headers are stripped when proxying is enabled
+- Updated README version badge to 1.0.6 and provider list (removed MoviesClub & Xprime, clarified active providers list)
+- Added proxy tuning parameter reference (clamp/progressive/tail prefetch, synthetic partial, force200) and host override notes
+- Expanded explanation that per-stream headers are stripped when proxying is enabled
 
+---
 
 ## [1.0.5] - 2025-09-19
 
@@ -154,16 +193,17 @@ All notable changes to this project will be documented in this file.
 ### Notes
 - `r2.dev` links are always removed from final output; no env flag required.
 
-### Documentation
+---
 
 ## [1.0.4] - 2025-09-18
 
-### Added
-
 ### Changed
+- Unified stream object schema standardized:
   ```json
   { "title": "…", "url": "…", "quality": "…", "provider": "…", "headers": { } }
   ```
+
+---
 
 ## [1.0.3] - 2025-09-17
 
@@ -173,6 +213,8 @@ All notable changes to this project will be documented in this file.
 ### Notes
 - If you were seeing `ERR_CONNECTION_REFUSED` on `http://192.168.86.75:8787`, pull the latest image or rebuild, then re-run with `-p 8787:8787`.
 
+---
+
 ## [1.0.2] - 2025-09-17
 
 ### Fixed
@@ -180,6 +222,8 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 - Updated README version badge to 1.0.2 and verified Docker commands use `-p 8787:8787`.
+
+---
 
 ## [1.0.1] - 2025-09-17
 
@@ -205,24 +249,15 @@ All notable changes to this project will be documented in this file.
 - Provider matrix re-renders immediately after Clear All (no page refresh needed).
 - Handling of Exclude Codecs "ALL" previously not persisting correctly.
 
-## [1.0.0] - 2025-09-16
-- Initial stable release.
-
-[1.0.8]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.7...v1.0.8
-[1.0.7]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.6...v1.0.7
-[1.0.6]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.5...v1.0.6
-[1.0.5]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.4...v1.0.5
-[1.0.3]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.2...v1.0.3
-[1.0.4]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.3...v1.0.4
-[1.0.2]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.1...v1.0.2
-[1.0.1]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.0...v1.0.1
+---
 
 ## [1.0.0] - 2025-09-16
+Initial stable release.
 
 ### Added
 - Comprehensive `README.md` (features, endpoints, admin UI overview, screenshots gallery, Docker usage, troubleshooting).
 - `LICENSE` (MIT) file.
-- Multi‑TMDB key rotation support (array of keys; random selection per request).
+- Multi-TMDB key rotation support (array of keys; random selection per request).
 - Config override system writing to `utils/user-config.json` with live merged view.
 - Session-based authentication (login, logout, session check, password change) with brute-force mitigation.
 - Rate limiting + exponential lockouts for failed login attempts.
@@ -259,9 +294,23 @@ All notable changes to this project will be documented in this file.
 - Heartbeat diagnostic interval to aid investigation of unexpected exits.
 - Intercepted premature `process.exit` calls to avoid silent shutdowns during debugging.
 
+---
+
 ## Historical Context
 This 1.0.0 release consolidates modernization work: provider cleanup, configuration clarity, deployment ergonomics (Docker + CI), security hardening, and observability.
 
 ---
 
-[1.0.0]: https://github.com/Inside4ndroid/TMDB-Embed-API/releases/v1.0.0
+[1.3.0]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.1.1...v1.2.0
+[1.1.1]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.9...v1.1.0
+[1.0.9]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.8...v1.0.9
+[1.0.8]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.7...v1.0.8
+[1.0.7]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.6...v1.0.7
+[1.0.6]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.5...v1.0.6
+[1.0.5]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.4...v1.0.5
+[1.0.4]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.3...v1.0.4
+[1.0.3]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.2...v1.0.3
+[1.0.2]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.1...v1.0.2
+[1.0.1]: https://github.com/Inside4ndroid/TMDB-Embed-API/compare/v1.0.0...v1.0.1

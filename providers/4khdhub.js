@@ -123,14 +123,10 @@ function validateUrl(url) {
 }
 
 function makeRequest(url, options = {}) {
-    const maxRedirects = options.maxRedirects || 5;
-    let redirectCount = 0;
-
-    const doRequest = (currentUrl) => {
-        return new Promise((resolve, reject) => {
-            const urlObj = new URL(currentUrl);
-            const isHttps = urlObj.protocol === 'https:';
-            const httpModule = isHttps ? https : http;
+    return new Promise((resolve, reject) => {
+        const urlObj = new URL(url);
+        const isHttps = urlObj.protocol === 'https:';
+        const httpModule = isHttps ? https : http;
 
             const requestOptions = {
                 hostname: urlObj.hostname,
@@ -144,53 +140,28 @@ function makeRequest(url, options = {}) {
                 timeout: 30000
             };
 
-            const req = httpModule.request(requestOptions, (res) => {
-                const isRedirect = [301, 302, 303, 307, 308].includes(res.statusCode);
+        const req = httpModule.request(requestOptions, (res) => {
+            if (options.allowRedirects === false && (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 303 || res.statusCode === 307 || res.statusCode === 308)) {
+                resolve({ statusCode: res.statusCode, headers: res.headers });
+                return;
+            }
 
-                // Allow callers to opt out of automatic redirect following
-                if (options.allowRedirects === false && isRedirect) {
-                    resolve({ statusCode: res.statusCode, headers: res.headers });
-                    return;
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                if (options.parseHTML && data) {
+                    const $ = cheerio.load(data);
+                    resolve({ $: $, body: data, statusCode: res.statusCode, headers: res.headers });
+                } else {
+                    resolve({ body: data, statusCode: res.statusCode, headers: res.headers });
                 }
-
-                // Follow redirects automatically (fixes hubcloud.ist -> hubcloud.cx etc.)
-                if (isRedirect && redirectCount < maxRedirects) {
-                    res.resume(); // Drain the response body
-                    const location = res.headers['location'];
-                    if (location) {
-                        redirectCount++;
-                        let redirectUrl;
-                        try {
-                            redirectUrl = new URL(location, currentUrl).toString();
-                        } catch (e) {
-                            reject(new Error(`Invalid redirect URL: ${location}`));
-                            return;
-                        }
-                        console.log(`[makeRequest] Following redirect ${redirectCount}/${maxRedirects}: ${redirectUrl}`);
-                        doRequest(redirectUrl).then(resolve).catch(reject);
-                        return;
-                    }
-                }
-
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                    if (options.parseHTML && data) {
-                        const $ = cheerio.load(data);
-                        resolve({ $: $, body: data, statusCode: res.statusCode, headers: res.headers });
-                    } else {
-                        resolve({ body: data, statusCode: res.statusCode, headers: res.headers });
-                    }
-                });
             });
-
-            req.on('error', reject);
-            req.on('timeout', () => reject(new Error('Request timeout')));
-            req.end();
         });
-    };
 
-    return doRequest(url);
+        req.on('error', reject);
+        req.on('timeout', () => reject(new Error('Request timeout')));
+        req.end();
+    });
 }
 
 // Helper function to decode URL-encoded filenames and make them human-readable
@@ -700,8 +671,8 @@ function extractHubCloudLinks(url, referer) {
                         const altElement = $(selector).first();
                         if (altElement.length > 0) {
                             const rawHref = altElement.attr('href');
-                            if (rawHref) {
-                                href = rawHref.startsWith('http') ? rawHref : `${baseUrl.replace(/\/$/, '')}/${rawHref.replace(/^\//, '')}`;
+                            if (rawHref && /^https?:\/\//i.test(rawHref)) {
+                                href = rawHref;
                                 console.log(`[4KHDHub] Found download link with selector ${selector}: ${href}`);
                                 found = true;
                                 break;
@@ -747,6 +718,22 @@ function extractHubCloudLinks(url, referer) {
             // Find download buttons
             const downloadButtons = $('div.card-body h2 a.btn');
             console.log(`[4KHDHub] Found ${downloadButtons.length} download buttons`);
+
+            // Apply JS-assigned pixel server hrefs (var pxl = "https://...") — the page
+            // overwrites the pixeldrain button href at runtime, so prefer the JS value
+            const pxlMatch = (response.body || '').match(/var\s+pxl\s*=\s*["']([^"']+)["']/);
+            if (pxlMatch && pxlMatch[1]) {
+                const pxlUrl = pxlMatch[1];
+                let applied = false;
+                $('a.btn[href*="pixeldrain"]').each((i, el) => {
+                    $(el).attr('href', pxlUrl);
+                    applied = true;
+                });
+                if (!applied) {
+                    $('div.card-body h2').append(`<a href="${pxlUrl}" class="btn">Download [PixelServer]</a>`);
+                }
+                console.log(`[4KHDHub] Applied JS-assigned pixel server URL: ${pxlUrl}`);
+            }
 
             if (downloadButtons.length === 0) {
                 // Try alternative selectors for download buttons
@@ -950,13 +937,12 @@ function extractHubCloudLinks(url, referer) {
                     } else if (link.includes('pixeldra')) {
                         console.log(`[4KHDHub] Button ${index + 1} is Pixeldrain`);
 
-                        // Convert pixeldrain.net/u/ID or pixeldrain.dev/u/ID format to pixeldrain API format
+                        // Convert pixeldrain.net/u/ID format to pixeldrain.net/api/file/ID format
                         let convertedLink = link;
-                        const pixeldrainMatch = link.match(/pixeldrain\.(?:net|dev)\/u\/([a-zA-Z0-9]+)/);
+                        const pixeldrainMatch = link.match(/pixeldrain\.net\/u\/([a-zA-Z0-9]+)/);
                         if (pixeldrainMatch) {
                             const fileId = pixeldrainMatch[1];
-                            const pixeldrainDomain = link.includes('pixeldrain.dev') ? 'pixeldrain.dev' : 'pixeldrain.net';
-                            convertedLink = `https://${pixeldrainDomain}/api/file/${fileId}`;
+                            convertedLink = `https://pixeldrain.net/api/file/${fileId}`;
                             console.log(`[4KHDHub] Converted Pixeldrain URL from ${link} to ${convertedLink}`);
                         }
 
@@ -1041,32 +1027,16 @@ function extractHubCloudLinks(url, referer) {
                                 allowRedirects: false
                             })
                                 .then(response => {
-                                    const locationHeader = response.headers['location'];
-                                    if (!locationHeader) {
+                                    const redirectUrl = response.headers['location'];
+                                    if (!redirectUrl) {
                                         throw new Error('No redirect found');
-                                    }
-
-                                    // Resolve relative redirects
-                                    let redirectUrl;
-                                    try {
-                                        redirectUrl = new URL(locationHeader, currentLink).toString();
-                                    } catch (e) {
-                                        throw new Error('Invalid redirect URL');
                                     }
 
                                     console.log(`[4KHDHub] 10Gbps redirect: ${redirectUrl}`);
 
-                                    // Check if this redirect contains the final direct video link
-                                    if (redirectUrl.includes('link=')) {
+                                    if (redirectUrl.includes('id=')) {
                                         // Final redirect, extract the link parameter
-                                        let finalLink;
-                                        try {
-                                            finalLink = new URL(redirectUrl).searchParams.get('link');
-                                        } catch (e) {
-                                            // Fallback to manual parsing
-                                            finalLink = decodeURIComponent(redirectUrl.split('link=')[1] || '');
-                                        }
-
+                                        const finalLink = redirectUrl.split('link=')[1];
                                         if (finalLink) {
                                             console.log(`[4KHDHub] 10Gbps final link: ${finalLink}`);
                                             const decodedUrl = decodeURIComponent(finalLink);
@@ -1079,41 +1049,32 @@ function extractHubCloudLinks(url, referer) {
                                                     if (size) titleParts.push(size);
                                                     const finalTitle = titleParts.join('\n');
 
-                                                    return {
-                                                        name: `4KHDHub - 10Gbps Server${qualityLabel}`,
-                                                        title: finalTitle,
-                                                        url: decodedUrl,
-                                                        quality: quality,
-                                                        provider: '4khdhub',
-                                                        headers: {}
-                                                    };
-                                                })
-                                                .catch(() => {
-                                                    const displayFilename = headerDetails || 'Unknown';
-                                                    const titleParts = [];
-                                                    if (displayFilename) titleParts.push(displayFilename);
-                                                    if (size) titleParts.push(size);
-                                                    const finalTitle = titleParts.join('\n');
+                                        return {
+                                            name: `4KHDHub - 10Gbps Server${qualityLabel}`,
+                                            title: finalTitle,
+                                            url: decodedUrl,
+                                            quality: quality,
+                                            provider: '4khdhub',
+                                            headers: {}
+                                        };
+                                    })
+                                    .catch(() => {
+                                        const displayFilename = headerDetails || 'Unknown';
+                                        const titleParts = [];
+                                        if (displayFilename) titleParts.push(displayFilename);
+                                        if (size) titleParts.push(size);
+                                        const finalTitle = titleParts.join('\n');
 
-                                                    return {
-                                                        name: `4KHDHub - 10Gbps Server${qualityLabel}`,
-                                                        title: finalTitle,
-                                                        url: decodedUrl,
-                                                        quality: quality,
-                                                        provider: '4khdhub',
-                                                        headers: {}
-                                                    };
-                                                });
-                                        }
-                                        throw new Error('Final link not found');
-                                    } else {
-                                        currentLink = redirectUrl;
-                                        return followRedirects();
-                                    }
-                                });
-                        };
-
-                        followRedirects()
+                                        return {
+                                            name: `4KHDHub - 10Gbps Server${qualityLabel}`,
+                                            title: finalTitle,
+                                            url: decodedUrl,
+                                            quality: quality,
+                                            provider: '4khdhub',
+                                            headers: {}
+                                        };
+                                    });
+                            })
                             .then(result => {
                                 console.log(`[4KHDHub] 10Gbps processing completed`);
                                 resolve(result);
@@ -1431,6 +1392,12 @@ function extractHubDriveLinks(url, referer) {
 
             console.log(`[4KHDHub] HubDrive extracted info - Size: ${size}, Header: ${header}, Quality: ${quality}, HeaderDetails: ${headerDetails}`);
 
+            // Guard against dead/expired HubDrive files ("File not found" page)
+            if (/file not found/i.test(header)) {
+                console.log('[4KHDHub] HubDrive file not found, skipping');
+                return [];
+            }
+
             // Extract filename from header for title display
             let filename = headerDetails || header || 'Unknown';
             // Clean up the filename by removing common prefixes and file extensions
@@ -1456,8 +1423,12 @@ function extractHubDriveLinks(url, referer) {
                 for (const selector of alternatives) {
                     foundBtn = $(selector).first();
                     if (foundBtn.length > 0) {
-                        console.log(`[4KHDHub] Found download button with selector: ${selector}`);
-                        break;
+                        const altHref = foundBtn.attr('href');
+                        if (altHref && /^https?:\/\//i.test(altHref)) {
+                            console.log(`[4KHDHub] Found download button with selector: ${selector}`);
+                            break;
+                        }
+                        foundBtn = null;
                     }
                 }
 
@@ -1833,7 +1804,9 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
             const suspiciousPatterns = [
                 'www-google-com.cdn.ampproject.org',
                 'bloggingvector.shop',
-                'cdn.ampproject.org'
+                'cdn.ampproject.org',
+                'hubcloud.cx/tg',  // Telegram share redirects, not playable streams
+                '/tg/go'
             ];
 
             const isSuspicious = suspiciousPatterns.some(pattern => url.includes(pattern));

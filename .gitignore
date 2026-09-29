@@ -1,3 +1,5 @@
 /node_modules
 restart.trigger
 .vscode/
+.env
+/tmp_context

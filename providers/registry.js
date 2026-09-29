@@ -12,9 +12,14 @@ const providerFunctionMap = {
   'vixsrc.js': 'getVixsrcStreams',
   'videasy.js': 'getVideasyStreams',
   'vidlink.js': 'getVidlinkStreams',
-  'lordflix.js': 'getLordflixStreams',
-  'notorrent.js': 'getNotorrentStreams',
   'dahmermovies.js': 'getDahmermoviesStreams',
+  'streamflix.js': 'getStreamflixStreams',
+  'vaplayer.js': 'getVaplayerStreams',
+  'castletv.js': 'getCastletvStreams',
+  'hdghartv.js': 'getHdghartvStreams',
+  'netmirror.js': 'getNetmirrorStreams',
+  'onetouchtv.js': 'getOnetouchtvStreams',
+  'zxcstreams.js': 'getZxcstreamsStreams',
 };
 
 // Stats for debug endpoint

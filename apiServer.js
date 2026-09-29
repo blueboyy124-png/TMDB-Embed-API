@@ -281,7 +281,7 @@ app.get('/api/status', (req,res) => {
     const cookieOk = !cookieRequired || (config.febboxCookies && config.febboxCookies.length > 0);
     return { name: p.name, enabled: p.enabled, cookieRequired, cookieOk };
   });
-  res.json({ success:true, metrics: {
+  res.json({ success:true, providerCheckTmdbId: config.providerCheckTmdbId, metrics: {
     uptimeSeconds: Math.round((Date.now()-metrics.startTime)/1000),
     requestsTotal: metrics.requestsTotal,
     streamRequests: metrics.streamRequests,

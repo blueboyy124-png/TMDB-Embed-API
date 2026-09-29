@@ -337,7 +337,8 @@ async function clearAll(){
 		enablePStreamApi: true,
 		disableUrlValidation: false,
 		disable4khdhubUrlValidation: false,
-		showboxCacheDir: null
+		showboxCacheDir: null,
+		providerCheckTmdbId: null
 	};
 	try {
 		const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -411,6 +412,8 @@ async function loadServerStatus(){
 		const j = await r.json();
 		if(!j.success) throw new Error('Status error');
 		metricsEl.textContent = JSON.stringify(j.metrics, null, 2);
+		const checkTmdbEl = document.getElementById('providerCheckTmdbId');
+		if(checkTmdbEl) checkTmdbEl.value = j.providerCheckTmdbId || '278';
 		if(endpointsEl) endpointsEl.textContent = (j.endpoints||[]).join('\n');
 		if(provEnhanced){
 			provEnhanced.innerHTML = '';
@@ -438,7 +441,8 @@ async function loadServerStatus(){
 	}
 }
 async function runProviderFunctionalChecks(){
-	const targetTmdb = '550'; // TMDB ID provided
+	const checkTmdbEl = document.getElementById('providerCheckTmdbId');
+	const targetTmdb = (checkTmdbEl && checkTmdbEl.value.trim()) || '278'; // TMDB ID (editable on status page)
 	const provEnhanced = document.getElementById('statusProvidersEnhanced');
 	const summary = document.getElementById('providerCheckSummary');
 	if(!provEnhanced) return;
@@ -477,6 +481,18 @@ async function runProviderFunctionalChecks(){
 		summary.textContent = `Progress: ${completed}/${rows.length} (passed: ${passed})`;
 	}
 	summary.textContent = `Checks complete: ${passed}/${rows.length} passed`;
+}
+async function saveProviderCheckTmdbId(){
+	const input = document.getElementById('providerCheckTmdbId');
+	const val = (input ? input.value : '').trim();
+	if(!val){ setStatus('Enter a TMDB ID to save', true); return; }
+	if(!/^\d+$/.test(val)){ setStatus('TMDB ID must be numeric', true); return; }
+	try {
+		const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ providerCheckTmdbId: val })});
+		const js = await r.json();
+		if(!js.success) throw new Error(js.error||'Save failed');
+		setStatus('Provider check TMDB ID saved: '+val);
+	} catch(e){ setStatus(e.message, true); }
 }
 document.addEventListener('DOMContentLoaded', ()=> {
 	initTheme();
@@ -533,6 +549,8 @@ document.addEventListener('DOMContentLoaded', ()=> {
 	if(rsb) rsb.addEventListener('click', loadServerStatus);
 	const rpc = document.getElementById('runProviderChecksBtn');
 	if(rpc) rpc.addEventListener('click', runProviderFunctionalChecks);
+	const spc = document.getElementById('saveProviderCheckTmdbBtn');
+	if(spc) spc.addEventListener('click', saveProviderCheckTmdbId);
 });
 function toggleSidebar(force){
 	const sb = document.getElementById('sidebar');

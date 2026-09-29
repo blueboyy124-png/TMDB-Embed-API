@@ -114,6 +114,8 @@ function normalizeConfig(base) {
   // Proxy features removed; always use direct connections
   if (cfg.disableUrlValidation === undefined) cfg.disableUrlValidation = false;
   if (cfg.disable4khdhubUrlValidation === undefined) cfg.disable4khdhubUrlValidation = false;
+  // TMDB ID used by the dashboard's "Run Provider Functional Checks" feature
+  if (!cfg.providerCheckTmdbId) cfg.providerCheckTmdbId = '278';
   return cfg;
 }
 
@@ -144,6 +146,8 @@ function applyConfigToEnv(cfg){
   process.env.DISABLE_URL_VALIDATION = cfg.disableUrlValidation ? 'true':'false';
   process.env.DISABLE_4KHDHUB_URL_VALIDATION = cfg.disable4khdhubUrlValidation ? 'true':'false';
   process.env.ENABLE_PROXY = cfg.enableProxy ? 'true':'false';
+  if (cfg.providerCheckTmdbId) process.env.PROVIDER_CHECK_TMDB_ID = String(cfg.providerCheckTmdbId);
+  else delete process.env.PROVIDER_CHECK_TMDB_ID;
   // Showbox specific
   if (cfg.showboxCacheDir) process.env.SHOWBOX_CACHE_DIR = cfg.showboxCacheDir; else delete process.env.SHOWBOX_CACHE_DIR;
   // Proxy settings removed; ensure legacy envs are cleared
@@ -174,7 +178,8 @@ function loadConfig() {
     // Proxy/env paths removed; always direct connections
     disableUrlValidation: process.env.DISABLE_URL_VALIDATION,
     disable4khdhubUrlValidation: process.env.DISABLE_4KHDHUB_URL_VALIDATION,
-    enableProxy: process.env.ENABLE_PROXY
+    enableProxy: process.env.ENABLE_PROXY,
+    providerCheckTmdbId: process.env.PROVIDER_CHECK_TMDB_ID || null
   };
   
   // Dynamic provider enable flags from env
