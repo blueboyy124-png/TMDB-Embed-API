@@ -114,7 +114,7 @@ function scoreYear(query, candidate) {
   if (diff === 0) return 1;
   if (diff === 1) return 0.6;
   if (diff === 2) return 0.3;
-  return 0.05;
+  return 0;
 }
 
 function scoreType(query, candidate) {
@@ -139,7 +139,13 @@ function scoreCandidate(query, candidate) {
   const year = scoreYear(query.year, candidate.year);
   const type = scoreType(query.type, candidate.type);
   const seasonEpisode = scoreSeasonEpisode(query, candidate);
-  const score = text.score * 0.6 + year * 0.1 + type * 0.2 + seasonEpisode * 0.1;
+  let score = text.score * 0.6 + year * 0.1 + type * 0.2 + seasonEpisode * 0.1;
+  if (query.year && candidate.year) {
+    const diff = Math.abs(query.year - candidate.year);
+    if (diff >= 3) {
+      score *= Math.max(0, 1 - (diff - 2) * 0.15);
+    }
+  }
   return {
     score: Math.min(1, Math.max(0, score)),
     matchedOn: text.matchedOn,

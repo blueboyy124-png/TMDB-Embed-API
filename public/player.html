@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fast player</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<style>
+  :root { --bg:#12161f; --panel:#1b2130; --line:#2c354a; --text:#e8ecf5; --dim:#8a94ab; --good:#4fd6a0; --bad:#ff7a7a; --accent:#f2b134; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+  main { max-width:960px; margin:0 auto; padding:20px 16px 48px; display:grid; gap:14px; }
+  .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:end; background:var(--panel); padding:12px; border-radius:8px; }
+  label { display:flex; flex-direction:column; gap:3px; color:var(--dim); font-size:.8rem; }
+  input, select { background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px; font:inherit; }
+  button { background:var(--accent); color:#1a1300; border:0; border-radius:6px; padding:9px 16px; font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); font-weight:400; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  video { width:100%; background:#000; border-radius:8px; max-height:58vh; }
+  #time { font-size:1.6rem; font-variant-numeric:tabular-nums; }
+  .cols { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:700px) { .cols { grid-template-columns:1fr; } }
+  pre { margin:0; background:var(--panel); padding:12px; border-radius:8px; height:260px; overflow:auto; font-size:.78rem; white-space:pre-wrap; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border-radius:8px; font-size:.82rem; }
+  td, th { padding:6px 10px; text-align:left; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
+  th { color:var(--dim); font-weight:500; }
+  .cool { color:var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar">
+    <label>API <input id="base" value="http://localhost:8787" size="22"></label>
+    <label>Type <select id="type"><option value="movie">Movie</option><option value="series">TV</option></select></label>
+    <label>TMDB ID <input id="id" value="1083381" size="9"></label>
+    <label>Season <input id="season" type="number" value="1" min="1" style="width:64px"></label>
+    <label>Episode <input id="episode" type="number" value="1" min="1" style="width:64px"></label>
+    <label>Pinned first (comma list) <input id="seed" value="dahmermovies" placeholder="dahmermovies, vidlink" size="26"></label>
+    <label>Only these providers <input id="only" type="checkbox"></label>
+    <label>Check title <input id="names" type="checkbox" checked></label>
+    <label title="How long to wait for pinned providers before using faster ones">Wait for pinned (s) <input id="wait" type="number" value="10" min="0" max="30" style="width:64px"></label>
+    <label>Auto-next <input id="auto" type="checkbox" checked></label>
+    <label>TMDB key (optional, fixes anime numbering) <input id="tmdb" size="20" placeholder="api key"></label>
+    <button id="play">Play</button>
+    <button id="prev" class="ghost" title="Previous episode (P)">◀ Prev</button>
+    <button id="next" class="ghost" title="Next episode (N)">Next ▶</button>
+    <button id="restart" class="ghost" title="Forget the saved position and start from 0:00">Start over</button>
+    <button id="season-btn" class="ghost" title="Ask each provider for season 1 and season 2 and see if the answer changes">Test season handling</button>
+    <button id="diag-btn" class="ghost" title="Ask every provider for this episode and compare">Diagnose episode</button>
+    <button id="wrong" class="ghost" title="Block this provider for TV shows and try the next">Wrong episode</button>
+    <button id="unblock" class="ghost">Clear blocks</button>
+    <span id="time">-</span> <span id="api" style="font-size:.8rem;color:var(--dim)" title="Click to re-check">● API ?</span>
+  </div>
+  <video id="v" controls playsinline></video>
+  <div id="diag"></div>
+  <div class="cols">
+    <pre id="log"></pre>
+    <div>
+      <table><thead><tr><th>Provider</th><th>Success</th><th>Avg time</th><th>State</th></tr></thead><tbody id="rank"></tbody></table>
+      <p><button class="ghost" id="reset">Reset learned stats</button></p>
+    </div>
+  </div>
+</main>
+
+<script src="resolver.js"></script>
+<script>
+if (typeof Resolver === 'undefined') {
+  document.body.insertAdjacentHTML('afterbegin', '<p style="padding:16px;color:#ff7a7a">resolver.js was not found. Keep it in the same folder as player.html.</p>');
+  throw new Error('resolver.js missing');
+}
+/* ============ Player wiring ============ */
+const $ = s => document.querySelector(s); let v = $('#v');
+// Remember every setting between visits.
+const UI = ['#base', '#type', '#id', '#season', '#episode', '#seed', '#wait'], CB = ['#only', '#names', '#auto'];
+try {
+  const s = JSON.parse(localStorage.getItem('sr.ui') || '{}');
+  for (const k of UI) if (s[k] != null) $(k).value = s[k];
+  for (const k of CB) if (s[k] != null) $(k).checked = s[k];
+} catch {}
+const saveUI = () => { const s = {}; for (const k of UI) s[k] = $(k).value; for (const k of CB) s[k] = $(k).checked; try { localStorage.setItem('sr.ui', JSON.stringify(s)); } catch {} };
+document.addEventListener('input', saveUI); document.addEventListener('change', saveUI);
+let hls = null, runId = 0, cur = null, runAC = null, retry = 0;
+const t0log = () => performance.now();
+let start = 0;
+const log = m => { const l = $('#log'); l.textContent += `${((performance.now() - start) / 1000).toFixed(2)}s  ${m}\n`; l.scrollTop = l.scrollHeight; };
+window.addEventListener('error', e => log('script error: ' + e.message));
+window.addEventListener('unhandledrejection', e => log('unhandled: ' + ((e.reason && e.reason.message) || e.reason)));
+const tk = () => $('#tmdb').value.trim();
+$('#tmdb').value = localStorage.getItem('sr.tmdb') || '';
+$('#tmdb').oninput = () => localStorage.setItem('sr.tmdb', tk());
+const norm = x => String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+async function epYear(id, q) {   // year this exact episode aired
+  const k = `sr.ey.${id}.${q.season}.${q.episode}`, c = localStorage.getItem(k);
+  if (c) return +c;
+  try {
+    const j = await (await fetch(`https://api.themoviedb.org/3/tv/${id}/season/${q.season}/episode/${q.episode}?api_key=${tk()}`, { signal: AbortSignal.timeout(4000) })).json();
+    const y = +String(j.air_date || '').slice(0, 4);
+    if (y) localStorage.setItem(k, y);
+    return y || null;
+  } catch { return null; }
+}
+// What the title should be: names, years (show + episode), and whether it is anime. Cached per id.
+async function expectInfo(t, id, q) {
+  if (!tk() || !$('#names').checked) return null;
+  const k = `sr.nm2.${t}.${id}`; let c = null;
+  try { c = JSON.parse(localStorage.getItem(k)); } catch {}
+  if (!c) try {
+    const j = await (await fetch(`https://api.themoviedb.org/3/${t === 'series' ? 'tv' : 'movie'}/${id}?api_key=${tk()}`, { signal: AbortSignal.timeout(4000) })).json();
+    const n = [...new Set([j.name || j.title, j.original_name || j.original_title].filter(Boolean).map(norm).filter(x => x.length > 2))];
+    if (!n.length) return null;
+    c = { n, y: +String(j.first_air_date || j.release_date || '').slice(0, 4) || 0, a: (j.genres || []).some(g => g.id === 16) && j.original_language === 'ja' };
+    localStorage.setItem(k, JSON.stringify(c));
+  } catch { return null; }
+  const years = [c.y]; if (t === 'series') years.push(await epYear(id, q));
+  return { names: c.n, years: years.filter(Boolean), anime: c.a };
+}
+async function tvInfo(id) {
+  if (!tk()) return null;
+  const k = 'sr.tv.' + id;
+  try { const c = JSON.parse(localStorage.getItem(k)); if (c) return c; } catch {}
+  const j = await (await fetch(`https://api.themoviedb.org/3/tv/${id}?api_key=${tk()}`, { signal: AbortSignal.timeout(5000) })).json();
+  const info = { seasons: (j.seasons || []).filter(x => x.season_number > 0).map(x => [x.season_number, x.episode_count]) };
+  if (info.seasons.length) localStorage.setItem(k, JSON.stringify(info));
+  return info;
+}
+async function absNum(id, q) {   // TMDB season/episode -> absolute episode number
+  const i = await tvInfo(id).catch(() => null);
+  if (!i || !i.seasons.length) return null;
+  let n = +q.episode;
+  for (const [sn, c] of i.seasons) if (sn < +q.season) n += c;
+  return n;
+}
+async function epName(id, q) {
+  if (!tk()) return null;
+  try { return (await (await fetch(`https://api.themoviedb.org/3/tv/${id}/season/${q.season}/episode/${q.episode}?api_key=${tk()}`)).json()).name || null; } catch { return null; }
+}
+// Absolute number only matters past season 1 (in season 1 it equals the episode number).
+const absFor = (id, q) => +q.season > 1 ? absNum(id, q).catch(() => null) : Promise.resolve(null);
+// Step one episode forward/back, rolling over season boundaries using TMDB episode counts. null = no more episodes.
+function shift(info, s, e, d) {
+  if (!info || !info.seasons.length) return [s, Math.max(1, e + d)];
+  const nums = info.seasons.map(x => x[0]).sort((a, b) => a - b), cnt = n => (info.seasons.find(x => x[0] === n) || [])[1];
+  e += d;
+  if (d > 0 && cnt(s) && e > cnt(s)) { const nx = nums.find(n => n > s); return nx ? [nx, 1] : null; }
+  if (d < 0 && e < 1) { const pv = [...nums].reverse().find(n => n < s); return pv ? [pv, cnt(pv) || 1] : [s, 1]; }
+  return [s, e];
+}
+// Where does overall episode number n fall? [season, episode] using TMDB season sizes, else null.
+function locate(info, n) { for (const [sn, c] of info.seasons.slice().sort((a, b) => a[0] - b[0])) { if (n <= c) return [sn, n]; n -= c; } return null; }
+// S20E123 when season 20 only has 14 episodes: treat the number as running on from the season start and find the real spot.
+async function normEp(id, q) {
+  const info = await tvInfo(id).catch(() => null); if (!info) return null;
+  const cnt = (info.seasons.find(x => x[0] === +q.season) || [])[1];
+  if (!cnt || +q.episode <= cnt) return null;
+  let before = 0; for (const [sn, c] of info.seasons) if (sn < +q.season) before += c;
+  const at = locate(info, before + +q.episode);
+  return at ? { at, cnt, abs: before + +q.episode } : null;
+}
+const seeds = () => $('#seed').value.split(/[\s,]+/).filter(Boolean);
+const R = new Resolver({ base: $('#base').value.replace(/\/$/, ''), log, initial: 4 });
+let playKey = '', busy = false, apiOk = null, watch = null;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+/* ---- remembered position per title/episode ---- */
+const posAll = () => { try { return JSON.parse(localStorage.getItem('sr.pos') || '{}'); } catch { return {}; } };
+const posGet = k => (posAll()[k] || [0])[0] || 0;
+function posSet(k, s) {
+  const a = posAll(); if (s > 5) a[k] = [Math.floor(s), Date.now()]; else delete a[k];
+  const e = Object.entries(a); if (e.length > 150) e.sort((x, y) => y[1][1] - x[1][1]).slice(150).forEach(([x]) => delete a[x]);
+  try { localStorage.setItem('sr.pos', JSON.stringify(a)); } catch {}
+}
+
+/* ---- is the API reachable? ---- */
+async function checkApi() {
+  const base = $('#base').value.replace(/\/$/, ''), t0 = performance.now(), el = $('#api');
+  try {
+    const r = await fetch(base + '/api/providers', { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    apiOk = true; el.textContent = `\u25CF API ${Math.round(performance.now() - t0)}ms`; el.style.color = 'var(--good)';
+  } catch { apiOk = false; el.textContent = '\u25CF API offline'; el.style.color = 'var(--bad)'; }
+  return apiOk;
+}
+
+/* ---- what a title should look like, kept per request so warm-ups never mix titles up ---- */
+function ctxFor(t, id, q) {
+  const cx = { expect: null, years: [], anime: false };
+  cx.ready = expectInfo(t, id, q).then(e => { if (e) { cx.expect = e.names; cx.years = e.years; cx.anime = e.anime; } return e; }).catch(() => null);
+  return cx;
+}
+function cfg() {
+  const base = $('#base').value.replace(/\/$/, '');
+  if (R.base !== base) R.names = null;
+  R.base = base; R.seed = seeds(); R.only = $('#only').checked; R.grace = Math.max(0, +$('#wait').value || 0) * 1000;
+}
+const readQ = () => ({ season: $('#season').value, episode: $('#episode').value });
+
+// One quick look at a link the browser refused: is the server refusing, or is it the file the browser cannot decode?
+const checked = new Set();
+async function linkCheck(u) {
+  if (checked.has(u)) return; checked.add(u);
+  const host = (() => { try { return new URL(u).host; } catch { return '?'; } })();
+  try {
+    const r = await fetch(u, { headers: { Range: 'bytes=0-1' }, signal: AbortSignal.timeout(8000) });
+    const ct = r.headers.get('content-type') || 'no content-type';
+    if (r.status >= 400) {
+      let body = ''; try { body = (await r.text()).replace(/\s+/g, ' ').slice(0, 240); } catch {}
+      log(`link check ${host}: HTTP ${r.status}, ${ct}  <-- the server refused it` + (body ? `\n    server said: ${body}` : ''));
+    } else {
+      log(`link check ${host}: HTTP ${r.status}, ${ct}  <-- server is fine, so this browser cannot play the file`);
+      if (r.body) r.body.cancel();
+    }
+  } catch (e) {
+    if (e.name === 'TimeoutError') { log(`link check ${host}: timed out`); return; }
+    const ac = new AbortController();   // second look without CORS: does anything answer at all?
+    try { await fetch(u, { mode: 'no-cors', signal: ac.signal }); log(`link check ${host}: the server answers, but sends no CORS headers, so the page cannot read it (a video tag does not need them; hls.js does)`); }
+    catch { log(`link check ${host}: nothing answered (server down or connection refused)`); }
+    finally { ac.abort(); }
+  }
+}
+// Loads the stream in a hidden <video>; several can be probed at once. Resolves {el,h,kill} when data arrives.
+function probe(st, signal, ms = 9000) {
+  return new Promise(res => {
+    const el = document.createElement('video'); el.muted = true; el.playsInline = true; el.preload = 'auto';
+    let h = null, fin = false;
+    const kill = () => { try { h && h.destroy(); } catch {} el.removeAttribute('src'); el.load(); };
+    const host = (() => { try { return new URL(st.url).host; } catch { return '?'; } })();
+    const done = (ok, why) => { if (fin) return; fin = true; if (!ok && why) st.why = `${why} [${host}]`; clearTimeout(to); signal.removeEventListener('abort', onAbort); if (!ok) kill(); res(ok ? { el, h, kill } : null); };
+    const onAbort = () => done(false), to = setTimeout(() => done(false, `no data in ${ms / 1000}s`), ms);
+    if (signal.aborted) return done(false);
+    signal.addEventListener('abort', onAbort);
+    if (/\.m3u8/i.test(st.url) && window.Hls && Hls.isSupported()) {
+      h = new Hls({ maxBufferLength: 12, startFragPrefetch: true });
+      h.on(Hls.Events.FRAG_LOADED, () => done(true));
+      h.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) done(false, 'hls ' + d.details); });
+      h.loadSource(st.url); h.attachMedia(el);
+    } else { el.onloadeddata = () => done(true); el.onerror = () => { const er = el.error; done(false, (['error', 'aborted', 'network error', 'decode error', 'format not supported or link refused'][er ? er.code : 0] || 'error') + (er && er.message ? ': ' + String(er.message).slice(0, 100) : '')); linkCheck(st.url); }; el.src = st.url; }
+    el.play().catch(() => {});
+  });
+}
+
+// Swap the winning hidden video into the page and keep watching it.
+// Trouble (error, or no progress for 15s) -> try to recover in place, else fail over to another source at the same spot.
+function attach(w, key, resumeAt) {
+  const p = w.probe; if (!p) return;
+  clearInterval(watch);
+  v.pause(); if (hls) hls.destroy(); hls = p.h;
+  const el = p.el, h = p.h;
+  el.controls = true; el.muted = false;
+  v.replaceWith(el); v = el; playKey = key;
+  let dead = false, fixes = 0, lastT = -1, lastMove = performance.now();
+  const from = resumeAt > 5 ? resumeAt : 0;
+  const fail = why => {
+    if (dead || el !== v) return; dead = true; clearInterval(watch);
+    const at = el.currentTime; if (at > 5) posSet(key, at);
+    log(`playback problem (${why})`);
+    if (retry++ < 3) { R.bad.add(w.url); R.cacheDrop(key); if (w.src) R.record(w.src, false); go(0, at > 5 ? at : undefined); }
+    else { $('#time').textContent = 'failed'; log('several sources failed in a row, press Play to try again'); }
+  };
+  el.onerror = () => fail('media error');
+  if (h) h.on(Hls.Events.ERROR, (e, d) => {
+    if (!d.fatal) return;
+    if (d.type === Hls.ErrorTypes.NETWORK_ERROR && fixes++ < 2) { log('network hiccup, reloading'); h.startLoad(); return; }
+    if (d.type === Hls.ErrorTypes.MEDIA_ERROR && fixes++ < 2) { log('media hiccup, recovering'); h.recoverMediaError(); return; }
+    fail('hls ' + d.details);
+  });
+  el.onended = () => {
+    dead = true; clearInterval(watch); posSet(key, 0);
+    if ($('#type').value === 'series' && $('#auto').checked) { log('episode finished, playing next'); step(1); }
+  };
+  const seek = () => { if (from && isFinite(el.duration) && from < el.duration - 10) el.currentTime = from; };
+  if (el.readyState >= 1) seek(); else el.addEventListener('loadedmetadata', seek, { once: true });
+  el.play().catch(() => { el.muted = true; el.play().catch(() => {}); log('browser blocked autoplay with sound: click the video to unmute'); });
+  watch = setInterval(() => {
+    if (dead || el.paused || el.ended) { lastMove = performance.now(); return; }
+    if (el.currentTime !== lastT) { lastT = el.currentTime; lastMove = performance.now(); if (el.currentTime - from > 30) retry = 0; return; }
+    if (performance.now() - lastMove > 15000) fail('no progress for 15s');
+  }, 2000);
+}
+
+async function go(attempt = 0, resumeAt) {
+  const me = ++runId;
+  if (runAC) runAC.abort(); runAC = new AbortController(); const sig = runAC.signal;
+  cfg();
+  const t = $('#type').value, id = $('#id').value.trim(), q = readQ();
+  if (!id) { log('enter a TMDB id first'); return; }
+  R.t = t; R.hdr.clear(); cur = null; busy = true; start = performance.now();
+  if (!go.said) { go.said = 1; const ua = navigator.userAgent; log(`browser: ${/Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'unknown'} | plays MKV: ${Resolver.mkv() ? 'yes' : 'no'} | plays H.265: ${Resolver.hevc() ? 'yes' : 'no'} | page origin: ${location.origin}`); }
+  if (t === 'series') {
+    const fx = await normEp(id, q);
+    if (fx && me === runId) {
+      log(`TMDB season ${q.season} only has ${fx.cnt} episodes, so S${q.season}E${q.episode} does not exist. #${fx.abs} overall is S${fx.at[0]}E${fx.at[1]}, using that.`);
+      q.season = String(fx.at[0]); q.episode = String(fx.at[1]); $('#season').value = q.season; $('#episode').value = q.episode; saveUI();
+    }
+  }
+  const key = R.key(t, id, q);
+  R.cancelWarm(key);                      // stop warming other titles, keep one for this title
+  const cx = ctxFor(t, id, q);
+  cx.ready.then(e => {
+    if (me !== runId) return;
+    if (!e) log(tk() ? 'no title info from TMDB' : 'no TMDB key: title/year checks are OFF');
+    else log(`expecting: ${e.names.join(' / ')} (${e.years.join('/')})${e.anime ? ' anime' : ''}`);
+  });
+  $('#time').textContent = '...';
+  if (apiOk === false && !(await checkApi())) {
+    if (me !== runId) return;
+    busy = false; $('#time').textContent = 'API offline'; log(`cannot reach the API at ${R.base}. Is the server running?`); return;
+  }
+  if (t === 'series') { q.abs = await absFor(id, q); if (q.abs) log(`absolute episode #${q.abs} available as fallback`); else if (+q.season > 1 && !tk()) log('no TMDB key: absolute-episode fallback is OFF (needed for anime past season 1)'); }
+  const ticker = setInterval(() => { if (me === runId) $('#time').textContent = ((performance.now() - start) / 1000).toFixed(1) + 's'; }, 100);
+  let win = null;
+  try { win = await R.resolve(t, id, q, (s, sg) => me === runId ? probe(s, sg) : Promise.resolve(null), 3, sig, 1500, cx); }
+  catch (e) { log('resolver error: ' + e.message); }
+  clearInterval(ticker);
+  if (me !== runId) { if (win && win.probe) win.probe.kill(); return; }
+  busy = false;
+  if (!win) {
+    if (attempt < 1) {                    // one automatic second try covers a brief API or network hiccup
+      log('nothing worked, trying once more in 2s'); $('#time').textContent = 'retry...';
+      await sleep(2000); if (me === runId) return go(attempt + 1, resumeAt); return;
+    }
+    $('#time').textContent = 'failed'; log('no working stream found'); await hdrHint(); renderRank(); return;
+  }
+  $('#time').textContent = ((performance.now() - start) / 1000).toFixed(2) + 's';
+  cur = win;
+  const at = resumeAt !== undefined ? resumeAt : posGet(key);
+  attach(win, key, at);
+  log(`title: ${win.title || win.name || '(none)'}`);
+  const ft = t === 'series' ? Resolver.tag(win) : null;   // what the file itself says it is
+  if (ft) log(`file says S${ft.s}E${ft.e}` + ((ft.s == q.season && ft.e == q.episode) || (q.abs && ft.e == q.abs) ? '' : '  <-- does not match what you asked for'));
+  log(`playing ${win.provider} ${win.quality || ''}${win.cached ? ' (cached)' : ''}`);
+  if (at > 5) log(`resuming at ${fmt(at)}`);
+  if (t === 'series') warmNext(t, id, q, key);
+  renderRank();
+}
+
+// While something plays, get the next two episodes ready so "Next" and auto-next start instantly.
+// Most providers hand out links that need Referer/Origin headers. A browser cannot send those, so unless the API
+// proxy is on, such links usually fail. Say so once, with the providers involved, instead of just "nothing worked".
+let proxyOn = null;
+async function hdrHint() {
+  if (R.mkvSeen && !Resolver.mkv()) log('hint: the links found are .mkv files and this browser cannot play Matroska (Safari and Firefox cannot). Open the player in Chrome or Edge.');
+  if (!R.hdr.size) return;
+  if (proxyOn === null) { try { const j = await (await fetch(R.base + '/api/config', { signal: AbortSignal.timeout(3000) })).json(); proxyOn = !!(j.merged && j.merged.enableProxy); } catch { proxyOn = false; } }
+  if (!proxyOn) log(`hint: ${[...R.hdr].join(', ')} gave links that need Referer/Origin headers, which a browser cannot send. Turn on enableProxy in the API config and restart it so they go through the proxy.`);
+}
+async function warmNext(t, id, q, key) {
+  const info = await tvInfo(id).catch(() => null);
+  let se = +q.season, ep = +q.episode;
+  for (let n = 0; n < 2; n++) {
+    if (busy || playKey !== key) return;
+    const nx = shift(info, se, ep, 1); if (!nx) return;
+    [se, ep] = nx;
+    const nq = { season: String(se), episode: String(ep) }; nq.abs = await absFor(id, nq);
+    if (busy || playKey !== key) return;
+    await R.prefetch(t, id, nq, ctxFor(t, id, nq));
+  }
+}
+// Warm the title currently typed in the boxes, shortly after the last keystroke, so Play is (nearly) instant.
+let warmTimer = null;
+const warmSoon = () => { clearTimeout(warmTimer); warmTimer = setTimeout(warm, 900); };
+async function warm() {
+  if (busy) return;
+  cfg(); const t = $('#type').value, id = $('#id').value.trim(), q = readQ();
+  if (!id) return;
+  if (t === 'series') q.abs = await absFor(id, q);
+  if (busy) return;
+  R.t = t; R.prefetch(t, id, q, ctxFor(t, id, q));
+}
+async function step(d) {
+  if ($('#type').value !== 'series') return;
+  const info = await tvInfo($('#id').value.trim()).catch(() => null);
+  const n = shift(info, +$('#season').value || 1, +$('#episode').value || 1, d);
+  if (!n) { log('no more episodes'); return; }
+  $('#season').value = n[0]; $('#episode').value = n[1]; saveUI(); retry = 0; go();
+}
+
+function renderRank() {
+  const sc = x => x.ok * x.ok / (x.lat + 500);
+  const rows = Object.entries(R.stats).sort((a, b) => sc(b[1]) - sc(a[1])).map(([k, x]) => {
+    const [p, t] = k.split('|'), blk = R.block[k], cool = x.fail >= 3 && Date.now() - x.last < R.cooldownFor(x);
+    return `<tr><td>${p} <span style="color:var(--dim)">${t}</span></td><td>${Math.round(x.ok * 100)}%</td><td>${Math.round(x.lat)}ms</td><td class="${blk || cool ? 'cool' : ''}">${blk ? 'blocked' : cool ? 'cooling' : 'ready'}</td></tr>`;
+  });
+  $('#rank').innerHTML = rows.join('') || '<tr><td colspan="4">Stats appear after the first run</td></tr>';
+}
+async function diagnose() {
+  R.base = $('#base').value.replace(/\/$/, ''); R.names = null;
+  const t = $('#type').value, id = $('#id').value.trim(), box = $('#diag');
+  const q = { season: $('#season').value, episode: $('#episode').value };
+  box.textContent = 'Asking every provider...';
+  let name = null;
+  if (t === 'series') { [q.abs, name] = await Promise.all([absNum(id, q), epName(id, q)]); }
+  const info = document.createElement('p');
+  info.textContent = t === 'series' ? `Asked for S${q.season}E${q.episode}${name ? ' "' + name + '"' : ''}${q.abs ? ', absolute #' + q.abs : ' (add a TMDB key to also test absolute numbering)'}. A tick means the stream title looks like that episode.` : 'Movie: no season/episode to check.';
+  const tb = document.createElement('tbody');
+  const table = document.createElement('table');
+  table.innerHTML = '<thead><tr><th>Provider</th><th>Numbering</th><th>Time</th><th>Streams</th><th>Top stream title</th><th></th></tr></thead>';
+  table.append(tb); box.replaceChildren(info, table);
+  const modes = t === 'series' && q.abs ? ['tmdb', 'abs'] : ['tmdb'];
+  const match = (st, m) => {
+    const txt = `${st.title || ''} ${st.name || ''}`.toLowerCase();
+    const s1 = m === 'abs' ? 1 : q.season, e1 = m === 'abs' ? q.abs : q.episode;
+    return (name && txt.includes(name.toLowerCase())) || new RegExp(`s0*${s1}\\s*[ ._-]?e0*${e1}\\b`, 'i').test(txt);
+  };
+  for (const p of await R.providers()) for (const m of modes) {
+    const tr = document.createElement('tr'), cells = [p, m === 'abs' ? `absolute (S1E${q.abs})` : `S${q.season}E${q.episode}`, '...', '', '', ''].map(x => { const td = document.createElement('td'); td.textContent = x; tr.append(td); return td; });
+    tb.append(tr);
+    const t0 = performance.now();
+    fetch(R.url(p, t, id, q, m)).then(r => r.json()).then(j => {
+      const list = (j.streams || []).filter(x => x && x.url);
+      cells[2].textContent = ((performance.now() - t0) / 1000).toFixed(1) + 's';
+      cells[3].textContent = list.length;
+      cells[4].textContent = (list.some(x => match(x, m)) ? '\u2714 ' : '') + (list[0] ? (list[0].title || list[0].name || list[0].url) : '');
+      if (list.length && t === 'series') {
+        const b = document.createElement('button'); b.className = 'ghost';
+        const label = () => { b.textContent = (R.numMode(p, id) === 'abs') === (m === 'abs') ? 'Using this' : 'Use this'; };
+        label(); b.addEventListener('relabel', label);
+        b.onclick = () => { R.learn(p, id, m === 'abs' ? 'abs' : 'tmdb'); R.clearCache(); box.querySelectorAll('button').forEach(x => x.dispatchEvent(new Event('relabel'))); label(); };
+        cells[5].append(b);
+      }
+    }).catch(e => { cells[2].textContent = 'error'; cells[4].textContent = e.message; });
+  }
+}
+// Same episode number, season 1 vs season 2. A provider that returns the same streams for both is ignoring the season.
+async function seasonTest() {
+  R.base = $('#base').value.replace(/\/$/, ''); R.names = null;
+  const id = $('#id').value.trim(), ep = $('#episode').value, box = $('#diag');
+  const qa = { season: 1, episode: ep }, qb = { season: 2, episode: ep };
+  const info = document.createElement('p');
+  info.textContent = `Asking every provider for S1E${ep} and S2E${ep} of ${id}. Use a show that has at least 2 seasons.`;
+  const tb = document.createElement('tbody'), table = document.createElement('table');
+  table.innerHTML = '<thead><tr><th>Provider</th><th>Season 1</th><th>Season 2</th><th>Verdict</th></tr></thead>';
+  table.append(tb);
+  const fix = document.createElement('button'); fix.textContent = 'Block providers that ignore season'; fix.disabled = true;
+  box.replaceChildren(info, table, fix);
+  const ignore = [];
+  await Promise.all((await R.providers()).map(async p => {
+    const tr = document.createElement('tr');
+    const c = [p, '...', '...', 'testing'].map(x => { const td = document.createElement('td'); td.textContent = x; tr.append(td); return td; });
+    tb.append(tr);
+    const one = async q => { const j = await (await fetch(R.url(p, 'series', id, q, 'tmdb'))).json(); return (j.streams || []).filter(x => x && x.url); };
+    try {
+      const [a, b] = await Promise.all([one(qa), one(qb)]);
+      const label = l => l.length ? `${l.length} streams, ${l[0].title || l[0].name || l[0].url}` : 'none';
+      c[1].textContent = label(a); c[2].textContent = label(b);
+      if (!a.length || !b.length) { c[3].textContent = 'not enough data'; return; }
+      const urls = new Set(a.map(x => x.url));
+      const same = b.some(x => urls.has(x.url)) || (a[0].title && a[0].title === b[0].title);
+      c[3].textContent = same ? 'IGNORES season' : 'honors season';
+      if (same) { c[3].className = 'cool'; ignore.push(p); fix.disabled = false; fix.textContent = `Block ${ignore.length} provider(s) that ignore season`; }
+    } catch (e) { c[3].textContent = 'error: ' + e.message; }
+  }));
+  fix.onclick = () => {
+    ignore.forEach(p => { R.block[p + '|series'] = 1; });
+    localStorage.setItem('sr.block', JSON.stringify(R.block)); R.clearCache(); renderRank();
+    fix.textContent = 'Blocked for TV shows'; fix.disabled = true;
+  };
+}
+$('#season-btn').onclick = seasonTest;
+$('#diag-btn').onclick = diagnose;
+const sync = () => { $('#season').disabled = $('#episode').disabled = $('#type').value !== 'series'; };
+$('#type').onchange = sync; sync();
+$('#play').onclick = () => { retry = 0; $('#log').textContent = ''; go(); };
+$('#prev').onclick = () => step(-1);
+$('#next').onclick = () => step(1);
+$('#restart').onclick = () => { if (playKey) posSet(playKey, 0); if (v && isFinite(v.duration)) v.currentTime = 0; };
+$('#wrong').onclick = () => {
+  if (!cur || !cur.src) { log('nothing playing to block'); return; }
+  const t = $('#type').value;
+  R.block[cur.src + '|' + t] = 1;
+
+  R.cacheDrop(R.key(t, $('#id').value.trim(), { season: $('#season').value, episode: $('#episode').value }));
+  go();
+};
+$('#unblock').onclick = () => { R.block = {}; localStorage.removeItem('sr.block'); renderRank(); };
+$('#reset').onclick = () => { R.stats = {}; R.save(); R.numT = {}; localStorage.removeItem('sr.numt'); R.play = {}; localStorage.removeItem('sr.play'); renderRank(); };
+renderRank();
+
+document.addEventListener('keydown', e => {
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (e.target.tagName === 'VIDEO' && (k === ' ' || k === 'arrowleft' || k === 'arrowright')) return;   // the video handles these itself
+  if (k === 'arrowright') v.currentTime += 10; else if (k === 'arrowleft') v.currentTime -= 10;
+  else if (k === 'n') step(1); else if (k === 'p') step(-1);
+  else if (k === 'm') v.muted = !v.muted;
+  else if (k === 'f') { if (document.fullscreenElement) document.exitFullscreen(); else if (v.requestFullscreen) v.requestFullscreen(); }
+  else if (k === ' ') { if (v.paused) v.play(); else v.pause(); }
+  else return;
+  e.preventDefault();
+});
+$('#api').onclick = checkApi;
+$('#base').addEventListener('change', checkApi);
+setInterval(checkApi, 20000); checkApi();
+setInterval(() => { if (playKey && v && !v.paused && v.currentTime > 5) posSet(playKey, v.currentTime); }, 5000);   // remember where you are
+if (!window.Hls) log('hls.js did not load (offline?), HLS streams will only play in Safari');
+['#id', '#season', '#episode', '#type'].forEach(s => { $(s).addEventListener('input', warmSoon); $(s).addEventListener('change', warmSoon); });
+warmSoon();
+</script>
+</body>
+</html>
