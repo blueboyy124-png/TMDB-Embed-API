@@ -6,6 +6,7 @@ const path = require('path');
 const providerCache = new Map();
 
 // Function name mappings for existing providers
+// Function name mappings for existing providers
 const providerFunctionMap = {
   'Showbox.js': 'getStreamsFromTmdbId',
   '4khdhub.js': 'get4KHDHubStreams',
@@ -20,6 +21,7 @@ const providerFunctionMap = {
   'netmirror.js': 'getNetmirrorStreams',
   'onetouchtv.js': 'getOnetouchtvStreams',
   'zxcstreams.js': 'getZxcstreamsStreams',
+  'anime.js': 'getAnimeStreams', // <-- Add this line
 };
 
 // Stats for debug endpoint
