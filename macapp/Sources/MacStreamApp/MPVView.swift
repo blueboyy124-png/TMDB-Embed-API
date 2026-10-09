@@ -297,10 +297,14 @@ final class MPVController {
 
     func seekBy(_ seconds: Double) { command("seek \(seconds)") }
 
-    func play(_ u: String) {
-        MPVController.log("loadfile \(u.prefix(80))")
-        // mpv's command parser treats ' as a delimiter, so any inside the URL must be escaped.
-        command("loadfile \(u.replacingOccurrences(of: "'", with: "\\'")) replace")
+    /// Loads a stream, optionally at a position. `start=` is mpv's per-file option (mpv ≥0.38):
+    /// the first frame lands at `startAt` instead of flashing 0:00 and then jumping — this is
+    /// how Continue Watching and mid-stream row switches keep their place.
+    func play(_ u: String, startAt: Double? = nil) {
+        var cmd = "loadfile \(u.replacingOccurrences(of: "'", with: "\\'")) replace"
+        if let s = startAt, s.isFinite, s > 1 { cmd += " start=\(Int(s))" }
+        MPVController.log("loadfile \(u.prefix(80))\(startAt.map { " @\(Int($0))s" } ?? "")")
+        command(cmd)
     }
 
     // MARK: teardown
@@ -308,8 +312,13 @@ final class MPVController {
     /// Stops playback and destroys mpv. Safe to call from main: the parts that
     /// can wait (render context free, stream teardown) run on cmdQueue, because
     /// waiting on mpv from main is exactly how the app used to beachball.
-    func shutdown() {
-        guard let h = handle else { return }
+    /// `completion` (optional) fires on main once the mpv handle is truly gone —
+    /// callers that immediately rebuild use it to not overlap teardown.
+    func shutdown(_ completion: (() -> Void)? = nil) {
+        guard let h = handle else {
+            if let completion { DispatchQueue.main.async(execute: completion) }
+            return
+        }
         let rc = renderContext
         handle = nil
         renderContext = nil
@@ -329,6 +338,7 @@ final class MPVController {
             CGLReleaseContext(cgl)
             CGLReleasePixelFormat(pf)
             MPVController.log("shutdown complete")
+            if let completion { DispatchQueue.main.async(execute: completion) }
         }
     }
 
@@ -484,6 +494,13 @@ final class MPVLayer: CAOpenGLLayer {
 final class VideoNSView: NSView {
     weak var mpvLayer: MPVLayer?
     override var acceptsFirstResponder: Bool { true }
+    // Clicking the video takes key focus, so the keyboard shortcuts (space, seek, row
+    // switching) have an unambiguous target. Without this the first responder is whatever
+    // list or button was touched last, and those controls correctly keep their own keys.
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
 }
 
 /// mpv rendering directly inside a SwiftUI view.
@@ -494,6 +511,8 @@ final class VideoNSView: NSView {
 /// "always inline" and "plays 4K" the same statement.
 struct MPVView: NSViewRepresentable {
     let url: String?
+    /// Position to start at when `url` changes (see MPVController.play(_:startAt:)).
+    var startAt: Double? = nil
     @Binding var isPlaying: Bool
     var onReady: (MPVController) -> Void = { _ in }
 
@@ -520,6 +539,15 @@ struct MPVView: NSViewRepresentable {
     }
 
     private func attach(to view: VideoNSView, coordinator: Coordinator, attempt: Int = 0) {
+        if attempt % 10 == 0 {
+            var chain: [String] = []
+            var v: NSView? = view
+            while let cur = v, chain.count < 12 {
+                chain.append(String(describing: type(of: cur)))
+                v = cur.superview
+            }
+            MPVController.log("attach attempt \(attempt): window=\(view.window != nil) chain=[\(chain.joined(separator: " > "))]")
+        }
         guard view.window != nil else {
             // Not in a window on the first pass. Retry rather than give up:
             // without a controller nothing -- not even switching streams -- can
@@ -563,7 +591,7 @@ struct MPVView: NSViewRepresentable {
 
         coordinator.lastURL = url
         coordinator.lastPaused = nil
-        if let u = url { c.play(u) }
+        if let u = url { c.play(u, startAt: startAt) }
         MPVController.log("attached to view")
         onReady(c)
     }
@@ -580,7 +608,7 @@ struct MPVView: NSViewRepresentable {
         if context.coordinator.lastURL != url {
             context.coordinator.lastURL = url
             context.coordinator.lastPaused = nil
-            if let u = url { c.play(u); isPlaying = true } else { c.command("stop") }
+            if let u = url { c.play(u, startAt: startAt); isPlaying = true } else { c.command("stop") }
         }
         // Sent only when it CHANGES, and asynchronously through the controller's
         // queue -- the deadlock the app used to hit was main parked inside mpv

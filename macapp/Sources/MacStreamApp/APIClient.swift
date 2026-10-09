@@ -23,6 +23,14 @@ struct SearchResult: Identifiable, Decodable, Hashable {
     let rating: Double?
 
     var isMovie: Bool { type == "movie" }
+    var ref: TitleRef { TitleRef(id: id, type: type) }
+}
+
+/// A title to open: TMDB id plus which side of the API to talk to. Hashable so it can be a
+/// navigation path value.
+struct TitleRef: Hashable {
+    let id: Int
+    let type: String        // "movie" | "series"
 }
 
 struct EpisodeInfo: Decodable, Hashable {
@@ -91,26 +99,68 @@ struct SearchResponse: Decodable {
 }
 
 struct Episode: Decodable, Identifiable, Hashable {
-    let seasonNumber: Int?
-    let episodeNumber: Int?
+    // Wire shape is `season` / `episode` / `still` (a full image URL), per
+    // GET /api/metadata/series/:id/episodes. The previous model read
+    // seasonNumber / episodeNumber / stillPath, none of which exist, so every
+    // episode decoded to S0E0 and picking one silently loaded S1E1.
+    let season: Int?
+    let episode: Int?
     let name: String?
     let airDate: String?
     let overview: String?
-    let stillPath: String?
+    let still: String?
+    let absoluteEpisode: Int?
+    let seasonRelativeEpisode: Int?
+    let runtime: Int?
+    let rating: Double?
 
-    var id: String { "s\(seasonNumber ?? 0)e\(episodeNumber ?? 0)" }
-    var label: String { "S\(seasonNumber ?? 0)E\(episodeNumber ?? 0)" }
-    var still: String? {
-        guard let p = stillPath, !p.isEmpty else { return nil }
-        return "https://image.tmdb.org/t/p/w300\(p)"
-    }
+    var id: String { "s\(season ?? 0)e\(episode ?? 0)" }
+    var label: String { "S\(season ?? 0)E\(episode ?? 0)" }
+    /// The episode's real number in this season (the API's position-based
+    /// `episode` is authoritative; `seasonRelativeEpisode` is the same value).
+    var number: Int? { episode ?? seasonRelativeEpisode }
 }
 
 struct EpisodesResponse: Decodable {
     let success: Bool?
     let episodes: [Episode]?
+    let season: Int?
+    let seasonName: String?
+    let totalEpisodes: Int?
+    let warnings: [String]?
+    let metadataError: String?
+}
+
+/// GET /api/metadata/:type/:tmdbId — the title screen in one call.
+struct TitleDetails: Decodable, Identifiable, Hashable {
+    let success: Bool?
+    let tmdbId: String?
+    let type: String?
     let title: String?
     let overview: String?
+    let tagline: String?
+    let status: String?
+    let genres: [String]?
+    let poster: String?
+    let backdrop: String?
+    let logo: String?
+    let releaseDate: String?
+    let year: Int?
+    let runtime: Int?
+    let voteAverage: Double?
+    let seasonCount: Int?
+    /// [[season number, episode count], ...] — everything the season picker needs.
+    let episodeCounts: [[Int]]?
+    let isAnime: Bool?
+    let metadataError: String?
+
+    var id: String { tmdbId ?? title ?? "?" }
+    var seasons: [(number: Int, count: Int)] {
+        (episodeCounts ?? []).compactMap { pair in
+            guard let n = pair.first else { return nil }
+            return (n, pair.count > 1 ? pair[1] : 0)
+        }
+    }
 }
 
 struct TrendingResponse: Decodable {
@@ -368,6 +418,11 @@ enum API {
 
     static func episodes(type: String, id: Int, season: Int) async throws -> EpisodesResponse {
         try await get("/api/metadata/\(type)/\(id)/episodes?season=\(season)", as: EpisodesResponse.self)
+    }
+
+    /// Title screen: poster/backdrop, overview, genres, and the season list.
+    static func metadata(type: String, id: Int) async throws -> TitleDetails {
+        try await get("/api/metadata/\(type)/\(id)", as: TitleDetails.self)
     }
 
     /// One provider only, straight JSON (no live feed). Used for the 4khdhub-default
