@@ -1,6 +1,21 @@
 const { config } = require('../utils/config');
+const { stampProviderTags } = require('../utils/streamTags');
+const { requestContext, runWithRequestContext } = require('../utils/requestContext');
+const { Semaphore } = require('../utils/concurrency');
 const fs = require('fs');
 const path = require('path');
+
+// Process-wide cap on concurrent provider invocations.
+//
+// Without this, N users x ~14 providers each multiply into unbounded concurrent work. That does more than
+// make things slow: providers like 4khdhub parse large HTML with cheerio, and CPU-bound parsing blocks
+// Node's event loop -- which stops timers firing. Measured with 8 users, the aggregate's own 20s soft deadline
+// fired 108,136ms late and six of eight users hit a 60s client timeout. The deadline could not save them
+// because the loop it depends on was blocked. Capping admission keeps that loop breathing.
+//
+// The default sits above one request's provider count (14) so a single user is never slowed down, while still
+// bounding the pile-up from many users. Override with PROVIDER_CONCURRENCY.
+const providerSemaphore = new Semaphore(Number(process.env.PROVIDER_CONCURRENCY) || 28);
 
 // Lazy load cache for providers
 const providerCache = new Map();
@@ -21,7 +36,7 @@ const providerFunctionMap = {
   'netmirror.js': 'getNetmirrorStreams',
   'onetouchtv.js': 'getOnetouchtvStreams',
   'zxcstreams.js': 'getZxcstreamsStreams',
-  'anime.js': 'getAnimeStreams', // <-- Add this line
+  'anime.js': 'getAnimeStreams',
 };
 
 // Stats for debug endpoint
@@ -58,7 +73,7 @@ function loadProvider(providerFile) {
 
 // Create fetch function for a provider
 function createFetchFunction(providerInfo) {
-  return async function(ctx) {
+  return async function(ctx, signal) {
     const module = loadProvider(providerInfo.file);
     if (!module) return [];
 
@@ -82,25 +97,32 @@ function createFetchFunction(providerInfo) {
           return [];
         }
         const cookies = await getEffectiveCookies();
-        const previousConfig = global.currentRequestConfig;
-        global.currentRequestConfig = { ...(previousConfig || {}) };
         let selected = null;
         if (cookies.length > 0) {
           const index = Math.floor(Math.random() * cookies.length);
           selected = cookies[index];
-          global.currentRequestConfig.cookie = selected.startsWith('ui=') ? selected : `ui=${selected}`;
-          global.currentRequestConfig.cookies = cookies.map(c => c.startsWith('ui=') ? c : `ui=${c}`);
+          // Per-request context, NOT a global. Two users requesting at the same instant each get their own
+          // object, so one can never observe or overwrite the other's chosen cookie. See utils/requestContext.js
+          // for what this replaces and why it was a cross-user data leak.
+          const rc = requestContext();
+          if (rc) {
+            rc.cookie = selected.startsWith('ui=') ? selected : `ui=${selected}`;
+            rc.cookies = cookies.map(c => c.startsWith('ui=') ? c : `ui=${c}`);
+          }
           lastCookieStats = { selected: selected.slice(0, 16) + '...', index, total: cookies.length, remainingMB: null, timestamp: Date.now() };
           console.log(`[registry] Cookie random pick index=${index} total=${cookies.length}`);
         }
-        result = await module[funcName](mediaType, ctx.tmdbId, ctx.season || null, ctx.episode || null, null, selected);
-        if (global.currentRequestUserCookieRemainingMB != null) {
-          lastCookieStats.remainingMB = global.currentRequestUserCookieRemainingMB;
+        // Admitted through the process-wide semaphore so many users queue rather than thrash the event loop.
+        result = await providerSemaphore.run(() =>
+          module[funcName](mediaType, ctx.tmdbId, ctx.season || null, ctx.episode || null, null, selected, signal));
+        const rc = requestContext();
+        if (rc && rc.remainingMB != null) {
+          lastCookieStats.remainingMB = rc.remainingMB;
         }
-        global.currentRequestConfig = previousConfig || {};
       } else {
         // Standard provider call
-        result = await module[funcName](ctx.tmdbId, mediaType, ctx.season || null, ctx.episode || null);
+        result = await providerSemaphore.run(() =>
+          module[funcName](ctx.tmdbId, mediaType, ctx.season || null, ctx.episode || null, signal));
       }
 
       const durationMs = Date.now() - t0;
@@ -109,9 +131,18 @@ function createFetchFunction(providerInfo) {
       if (!Array.isArray(result)) return [];
 
       // Add provider name if not present
-      return result.map(s => ({ ...s, provider: s.provider || providerInfo.name }));
+      const named = result.map(s => ({ ...s, provider: s.provider || providerInfo.name }));
+      // Tag here rather than in each route: this is the one place every provider's output passes through on
+      // its way to every endpoint, so "anime.js streams are anime" cannot be forgotten by a new route.
+      // The TMDB half of the classification needs the title's metadata, so it is applied by the routes.
+      return stampProviderTags(named, providerInfo.name);
 
     } catch (e) {
+      // Don't log aborted requests as errors - they're expected when the aggregate deadline fires
+      if (e && e.name === 'AbortError') {
+        console.log(`[registry] ${providerInfo.name} aborted`);
+        return [];
+      }
       console.error(`[registry] ${providerInfo.name} fetch error:`, e.message);
       return [];
     }
@@ -144,4 +175,28 @@ function getProvider(name) {
 
 function getCookieStats() { return lastCookieStats; }
 
-module.exports = { listProviders, getProvider, getCookieStats };
+// Exposed for /api/health. A non-zero `pending` here means provider work is queueing because more users
+// arrived than the process admits at once -- which is the intended behaviour, and the number to look at when
+// asking "is it slow because too many people, or because a provider is hanging?".
+function getAdmissionStatus() { return providerSemaphore.status(); }
+
+// --- Test hooks (scripts/verify-concurrency.mjs) ---
+// Not part of the public surface. They exist so the concurrency guarantees can be asserted directly rather
+// than inferred: `peekGlobalState` is what makes "no cross-user leak through a global" checkable at all.
+async function __test__getWithContext(mediaType, tmdbId, season, episode, _unused, selected) {
+  return runWithRequestContext(async () => {
+    const prov = getProvider('showbox');
+    if (!prov) return [];
+    return prov.fetch({ tmdbId, type: mediaType === 'movie' ? 'movie' : 'series', season, episode, imdbId: null, filters: {} });
+  });
+}
+function __test__peekGlobalState() {
+  return {
+    currentRequestConfig: global.currentRequestConfig,
+    currentRequestUserCookie: global.currentRequestUserCookie,
+    currentRequestUserCookieRemainingMB: global.currentRequestUserCookieRemainingMB,
+    currentRequestRegionPreference: global.currentRequestRegionPreference
+  };
+}
+
+module.exports = { listProviders, getProvider, getCookieStats, getAdmissionStatus, __test__getWithContext, __test__peekGlobalState };

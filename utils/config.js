@@ -29,17 +29,32 @@ function parseCookies(raw) {
   return Array.from(new Set(arr.map(c => c.replace(/^ui=/,'').trim()).filter(Boolean)));
 }
 
+// Records whether the override file was readable. A corrupt file used to fail silently to {} -- every
+// override quietly ignored, and with enableProxy among them the API kept handing out proxied URLs while the
+// proxy layer was never mounted, so every stream 404'd in the player with nothing in the logs to explain it.
+let lastOverrideError = null;
+
 function readOverrideFile() {
+  lastOverrideError = null;
   try {
     if (fs.existsSync(OVERRIDE_PATH)) {
       const raw = fs.readFileSync(OVERRIDE_PATH, 'utf8');
       const data = JSON.parse(raw);
-      return data && typeof data === 'object' ? data : {};
+      if (data && typeof data === 'object') return data;
+      lastOverrideError = 'override file does not contain a JSON object';
+      console.warn('[config] Failed to read override file:', lastOverrideError);
+      return {};
     }
   } catch (e) {
+    lastOverrideError = e.message;
     console.warn('[config] Failed to read override file:', e.message);
   }
   return {};
+}
+
+// For diagnostics: was the last load able to use the override file?
+function overrideStatus() {
+  return { path: OVERRIDE_PATH, ok: lastOverrideError == null, error: lastOverrideError };
 }
 
 function writeOverrideFile(obj) {
@@ -198,9 +213,23 @@ function loadConfig() {
 
 const config = loadConfig();
 
+// Keys that must never be stored by a round trip through the config form. The form cannot read them back
+// (GET /api/config masks them), so it must never send them, and must ask to have them replaced deliberately.
+const SECRET_KEYS = ['tmdbApiKeys', 'tmdbApiKey', 'febboxCookies', 'febboxCookie'];
+
 function saveConfigPatch(patch) {
   const currentOverride = readOverrideFile();
   const updated = { ...currentOverride, ...patch };
+  // Secrets are only replaced when the caller explicitly asks to replace them. The config UI cannot read back
+  // an existing key or cookie (GET /api/config masks them), so when an admin opens the page, changes one
+  // unrelated setting and saves, it has no way to send the secrets it cannot see. Merging would otherwise
+  // either wipe them or -- worse -- store the masked "e0554f…" placeholder as if it were the real key.
+  // So: a secret key that the patch omits is left exactly as it was, and replaceSecrets is what turns an
+  // explicit list into a replacement.
+  if (patch && patch.replaceSecrets) {
+    for (const key of SECRET_KEYS) delete updated[key];
+  }
+  delete updated.replaceSecrets;
   if (!updated.configVersion) updated.configVersion = CONFIG_SCHEMA_VERSION;
   // Remove keys set to null to fall back to env
   Object.keys(updated).forEach(k => { if (updated[k] === null) delete updated[k]; });
@@ -211,4 +240,4 @@ function saveConfigPatch(patch) {
   return false;
 }
 
-module.exports = { config, reloadConfig: () => Object.assign(config, loadConfig()), saveConfigPatch, OVERRIDE_PATH, CONFIG_SCHEMA_VERSION };
+module.exports = { config, reloadConfig: () => Object.assign(config, loadConfig()), saveConfigPatch, OVERRIDE_PATH, CONFIG_SCHEMA_VERSION, overrideStatus };

@@ -2,6 +2,7 @@ const https = require('https');
 const http = require('http');
 const { URL } = require('url');
 const cheerio = require('cheerio');
+const { BoundedTtlCache } = require('../utils/boundedCache');
 const fs = require('fs').promises;
 const path = require('path');
 
@@ -122,10 +123,68 @@ function validateUrl(url) {
     });
 }
 
-function makeRequest(url, options = {}) {
+// Validating every link costs one HTTP request each, and 4khdhub offers ~20 links per episode, so a cold
+// request spent 14s of its budget in here -- long enough that the aggregate gave up waiting and left 4khdhub
+// out of the response entirely, even though it had the most streams of any provider. It was the single
+// largest latency cost in the pipeline.
+//
+// The links are long-lived: they are presigned with an 8-hour expiry (`X-Amz-Expires=28800`), so a link that
+// validated once will still be valid on the next request. Remembering the verdict for an hour turns the
+// second request for an episode from 14s of round trips into a map lookup, which is what lets this provider
+// finish in time to be counted.
+//
+// Only successes are cached. A 403 here almost always means a signature that has just expired or a host that
+// blocks HEAD; caching that verdict would keep a perfectly good link suppressed long after the real link came
+// back, which is worse than re-checking it.
+const VALIDATION_CACHE_TTL_MS = Number(process.env['4KHDHUB_VALIDATION_CACHE_MS']) || 60 * 60 * 1000;
+const VALIDATION_CACHE_MAX = Number(process.env['4KHDHUB_VALIDATION_CACHE_MAX']) || 5000;
+const validationCache = new BoundedTtlCache(VALIDATION_CACHE_MAX);
+
+async function validateUrlCached(url) {
+    const cached = validationCache.get(url);
+    if (cached && (Date.now() - cached.at) < VALIDATION_CACHE_TTL_MS) {
+        console.log(`[4KHDHub] URL validation cached for ${url.slice(0, 70)}: VALID`);
+        return true;
+    }
+    const valid = await validateUrl(url);
+    if (valid) validationCache.set(url, { at: Date.now() });
+    else validationCache.delete(url);      // never remember a failure: see the note above
+    return valid;
+}
+
+function makeRequest(url, options = {}, signal = null) {
     return new Promise((resolve, reject) => {
+        // Check if already aborted
+        if (signal?.aborted) {
+            const err = new Error('Aborted');
+            err.name = 'AbortError';
+            reject(err);
+            return;
+        }
+
         const maxRedirects = options.maxRedirects || 10;
         let redirectCount = 0;
+        let currentReq = null;
+
+        const abortHandler = () => {
+            if (currentReq) {
+                currentReq.destroy();
+            }
+            const err = new Error('Aborted');
+            err.name = 'AbortError';
+            reject(err);
+        };
+
+        // Listen for abort signal
+        if (signal) {
+            signal.addEventListener('abort', abortHandler);
+        }
+
+        const cleanup = () => {
+            if (signal) {
+                signal.removeEventListener('abort', abortHandler);
+            }
+        };
 
         const doRequest = (currentUrl) => {
             const urlObj = new URL(currentUrl);
@@ -144,12 +203,13 @@ function makeRequest(url, options = {}) {
                 timeout: 30000
             };
 
-            const req = httpModule.request(requestOptions, (res) => {
+            currentReq = httpModule.request(requestOptions, (res) => {
                 const redirectCodes = [301, 302, 303, 307, 308];
                 const isRedirect = redirectCodes.includes(res.statusCode);
                 const location = res.headers['location'];
 
                 if (options.allowRedirects === false && isRedirect) {
+                    cleanup();
                     resolve({ statusCode: res.statusCode, headers: res.headers, url: currentUrl });
                     return;
                 }
@@ -161,6 +221,7 @@ function makeRequest(url, options = {}) {
                     try {
                         nextUrl = new URL(location, currentUrl).toString();
                     } catch (error) {
+                        cleanup();
                         resolve({ statusCode: res.statusCode, headers: res.headers, body: '', url: currentUrl });
                         return;
                     }
@@ -172,6 +233,7 @@ function makeRequest(url, options = {}) {
                 let data = '';
                 res.on('data', chunk => data += chunk);
                 res.on('end', () => {
+                    cleanup();
                     if (options.parseHTML && data) {
                         const $ = cheerio.load(data);
                         resolve({ $: $, body: data, statusCode: res.statusCode, headers: res.headers, url: currentUrl });
@@ -181,9 +243,15 @@ function makeRequest(url, options = {}) {
                 });
             });
 
-            req.on('error', reject);
-            req.on('timeout', () => reject(new Error('Request timeout')));
-            req.end();
+            currentReq.on('error', (err) => {
+                cleanup();
+                reject(err);
+            });
+            currentReq.on('timeout', () => {
+                cleanup();
+                reject(new Error('Request timeout'));
+            });
+            currentReq.end();
         };
 
         doRequest(url);
@@ -213,8 +281,14 @@ function decodeFilename(filename) {
     }
 }
 
-function getFilenameFromUrl(url) {
-    return new Promise((resolve) => {
+function getFilenameFromUrl(url, signal = null) {
+    return new Promise((resolve, reject) => {
+        if (signal?.aborted) {
+            const err = new Error('Aborted');
+            err.name = 'AbortError';
+            reject(err);
+            return;
+        }
         try {
             const urlObj = new URL(url);
             const isHttps = urlObj.protocol === 'https:';
@@ -256,8 +330,22 @@ function getFilenameFromUrl(url) {
                 resolve(decodedFilename || null);
             });
 
-            req.on('error', () => resolve(null));
-            req.on('timeout', () => resolve(null));
+            const abortHandler = () => {
+                req.destroy();
+                const err = new Error('Aborted');
+                err.name = 'AbortError';
+                reject(err);
+            };
+            if (signal) signal.addEventListener('abort', abortHandler);
+
+            req.on('error', () => {
+                if (signal) signal.removeEventListener('abort', abortHandler);
+                resolve(null);
+            });
+            req.on('timeout', () => {
+                if (signal) signal.removeEventListener('abort', abortHandler);
+                resolve(null);
+            });
             req.end();
         } catch (error) {
             resolve(null);
@@ -281,9 +369,10 @@ function getDomains() {
         });
 }
 
-function getRedirectLinks(url) {
-    return makeRequest(url)
+function getRedirectLinks(url, signal = null) {
+    return makeRequest(url, {}, signal)
         .then(response => {
+            if (signal?.aborted) { const err = new Error('Aborted'); err.name = 'AbortError'; throw err; }
             const doc = response.body;
             const regex = /s\('o','([A-Za-z0-9+/=]+)'|ck\('_wp_http_\d+','([^']+)'/g;
             let combinedString = '';
@@ -308,7 +397,7 @@ function getRedirectLinks(url) {
                 }
 
                 if (wphttp1 && data) {
-                    return makeRequest(`${wphttp1}?re=${data}`, { parseHTML: true })
+                    return makeRequest(`${wphttp1}?re=${data}`, { parseHTML: true }, signal)
                         .then(resp => resp.document.body.textContent.trim())
                         .catch(() => '');
                 }
@@ -320,6 +409,7 @@ function getRedirectLinks(url) {
             }
         })
         .catch(error => {
+            if (error.name === 'AbortError') throw error;
             console.error('[4KHDHub] Error fetching redirect links:', error.message);
             return Promise.resolve('');
         });
@@ -671,12 +761,13 @@ function findBestMatch(results, query, tmdbYear = null) {
     return bestResult;
 }
 
-function extractHubCloudLinks(url, referer) {
+function extractHubCloudLinks(url, referer, signal = null) {
     console.log(`[4KHDHub] Starting HubCloud extraction for: ${url}`);
     const baseUrl = getBaseUrl(url);
 
-    return makeRequest(url, { parseHTML: true })
+    return makeRequest(url, { parseHTML: true }, signal)
         .then(response => {
+            if (signal?.aborted) { const err = new Error('Aborted'); err.name = 'AbortError'; throw err; }
             const $ = response.$;
             console.log(`[4KHDHub] Got HubCloud page, looking for download element...`);
 
@@ -721,9 +812,10 @@ function extractHubCloudLinks(url, referer) {
             }
 
             console.log(`[4KHDHub] Making request to HubCloud download page: ${href}`);
-            return makeRequest(href, { parseHTML: true });
+            return makeRequest(href, { parseHTML: true }, signal);
         })
         .then(response => {
+            if (signal?.aborted) { const err = new Error('Aborted'); err.name = 'AbortError'; throw err; }
             const $ = response.$;
 
             console.log(`[4KHDHub] Processing HubCloud download page...`);
@@ -781,6 +873,7 @@ function extractHubCloudLinks(url, referer) {
 
             const promises = downloadButtons.get().map((button, index) => {
                 return new Promise((resolve) => {
+                    if (signal?.aborted) { const err = new Error('Aborted'); err.name = 'AbortError'; throw err; }
                     const $button = $(button);
                     const link = $button.attr('href');
                     const text = $button.text();
@@ -798,8 +891,9 @@ function extractHubCloudLinks(url, referer) {
                     if (text.includes('FSL Server')) {
                         console.log(`[4KHDHub] Button ${index + 1} is FSL Server`);
                         // Get actual filename from HEAD request
-                        getFilenameFromUrl(link)
+                        getFilenameFromUrl(link, signal)
                             .then(actualFilename => {
+                                if (signal?.aborted) { const err = new Error('Aborted'); err.name = 'AbortError'; throw err; }
                                 const displayFilename = actualFilename || headerDetails || 'Unknown';
                                 const titleParts = [];
                                 if (displayFilename) titleParts.push(displayFilename);
@@ -825,7 +919,8 @@ function extractHubCloudLinks(url, referer) {
                                     headers
                                 });
                             })
-                            .catch(() => {
+                            .catch(err => {
+                                if (err?.name === 'AbortError') throw err;
                                 const displayFilename = headerDetails || 'Unknown';
                                 const titleParts = [];
                                 if (displayFilename) titleParts.push(displayFilename);
@@ -1156,19 +1251,21 @@ function extractHubCloudLinks(url, referer) {
         });
 }
 
-function searchContent(query) {
+function searchContent(query, signal = null) {
     return getDomains()
         .then(domains => {
+            if (signal?.aborted) { const err = new Error('Aborted'); err.name = 'AbortError'; throw err; }
             if (!domains || !domains['4khdhub']) {
                 throw new Error('Failed to get domain information');
             }
 
             const baseUrl = domains['4khdhub'];
             const searchUrl = `${baseUrl}/?s=${encodeURIComponent(query)}`;
-            return makeRequest(searchUrl, { parseHTML: true })
+            return makeRequest(searchUrl, { parseHTML: true }, signal)
                 .then(response => ({ response, baseUrl }));
         })
         .then(({ response, baseUrl }) => {
+            if (signal?.aborted) { const err = new Error('Aborted'); err.name = 'AbortError'; throw err; }
             const $ = response.$;
             const results = [];
 
@@ -1205,9 +1302,10 @@ function searchContent(query) {
         });
 }
 
-function loadContent(url) {
-    return makeRequest(url, { parseHTML: true })
+function loadContent(url, signal = null) {
+    return makeRequest(url, { parseHTML: true }, signal)
         .then(response => {
+            if (signal?.aborted) { const err = new Error('Aborted'); err.name = 'AbortError'; throw err; }
             const $ = response.$;
             const title = $('h1.page-title').text().split('(')[0].trim() || '';
             const poster = $('meta[property="og:image"]').attr('content') || '';
@@ -1348,38 +1446,50 @@ function loadContent(url) {
         });
 }
 
-function extractStreamingLinks(downloadLinks) {
+function extractStreamingLinks(downloadLinks, signal = null) {
     console.log(`[4KHDHub] Processing ${downloadLinks.length} download links...`);
+
+    const checkAbort = () => {
+        if (signal?.aborted) {
+            const err = new Error('Aborted');
+            err.name = 'AbortError';
+            throw err;
+        }
+    };
 
     const promises = downloadLinks.map((link, index) => {
         return new Promise((resolve) => {
+            checkAbort();
             console.log(`[4KHDHub] Processing link ${index + 1}: ${link}`);
 
             // Check if link needs redirect processing
             if (link.toLowerCase().includes('id=')) {
                 console.log(`[4KHDHub] Link ${index + 1} needs redirect processing`);
-                getRedirectLinks(link)
+                getRedirectLinks(link, signal)
                     .then(resolvedLink => {
+                        checkAbort();
                         if (resolvedLink) {
                             console.log(`[4KHDHub] Link ${index + 1} resolved to: ${resolvedLink}`);
-                            processExtractorLink(resolvedLink, resolve, index + 1);
+                            processExtractorLink(resolvedLink, resolve, index + 1, signal);
                         } else {
                             console.log(`[4KHDHub] Link ${index + 1} redirect resolution failed`);
                             resolve(null);
                         }
                     })
                     .catch(err => {
+                        if (err.name === 'AbortError') throw err;
                         console.error(`[4KHDHub] Redirect failed for link ${index + 1} (${link}):`, err.message);
                         resolve(null);
                     });
             } else {
-                processExtractorLink(link, resolve, index + 1);
+                processExtractorLink(link, resolve, index + 1, signal);
             }
         });
     });
 
     return Promise.all(promises)
         .then(results => {
+            checkAbort();
             const validResults = results.filter(r => r !== null).flat();
             const filtered = validResults.filter(link => {
                 if (!link || !link.url) return false;
@@ -1532,30 +1642,42 @@ function processHubDriveLink(href, referer, filename = 'Unknown', size = '', qua
     }
 }
 
-function processExtractorLink(link, resolve, linkNumber) {
+function processExtractorLink(link, resolve, linkNumber, signal = null) {
+    const checkAbort = () => {
+        if (signal?.aborted) {
+            const err = new Error('Aborted');
+            err.name = 'AbortError';
+            throw err;
+        }
+    };
+
     const linkLower = link.toLowerCase();
 
     console.log(`[4KHDHub] Checking extractors for link ${linkNumber}: ${link}`);
 
     if (linkLower.includes('hubdrive')) {
         console.log(`[4KHDHub] Link ${linkNumber} matched HubDrive extractor`);
-        extractHubDriveLinks(link, '4KHDHub')
+        extractHubDriveLinks(link, '4KHDHub', signal)
             .then(links => {
+                checkAbort();
                 console.log(`[4KHDHub] HubDrive extraction completed for link ${linkNumber}:`, links);
                 resolve(links);
             })
             .catch(err => {
+                if (err.name === 'AbortError') throw err;
                 console.error(`[4KHDHub] HubDrive extraction failed for link ${linkNumber} (${link}):`, err.message);
                 resolve(null);
             });
     } else if (linkLower.includes('hubcloud')) {
         console.log(`[4KHDHub] Link ${linkNumber} matched HubCloud extractor`);
-        extractHubCloudLinks(link, '4KHDHub')
+        extractHubCloudLinks(link, '4KHDHub', signal)
             .then(links => {
+                checkAbort();
                 console.log(`[4KHDHub] HubCloud extraction completed for link ${linkNumber}:`, links);
                 resolve(links);
             })
             .catch(err => {
+                if (err.name === 'AbortError') throw err;
                 console.error(`[4KHDHub] HubCloud extraction failed for link ${linkNumber} (${link}):`, err.message);
                 resolve(null);
             });
@@ -1575,8 +1697,9 @@ function processExtractorLink(link, resolve, linkNumber) {
             // labelExtra removed (not used)
 
             // Get actual filename from HEAD request
-            getFilenameFromUrl(link)
+            getFilenameFromUrl(link, signal)
                 .then(actualFilename => {
+                    checkAbort();
                     const displayFilename = actualFilename || filename || 'Unknown';
                     const titleParts = [];
                     if (displayFilename) titleParts.push(displayFilename);
@@ -1592,7 +1715,8 @@ function processExtractorLink(link, resolve, linkNumber) {
                         headers: {}
                     }]);
                 })
-                .catch(() => {
+                .catch(err => {
+                    if (err.name === 'AbortError') throw err;
                     const displayFilename = filename || 'Unknown';
                     const titleParts = [];
                     if (displayFilename) titleParts.push(displayFilename);
@@ -1647,10 +1771,34 @@ async function getTMDBDetails(tmdbId, mediaType) {
     }
 }
 
+const REDIRECT_CONCURRENCY = 4;   // redirect pages resolved at once; a burst at every link makes the hosts fail
+const mapLimit = async (items, limit, fn) => {
+    const out = new Array(items.length);
+    let next = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (next < items.length) {
+            const i = next++;
+            try { out[i] = await fn(items[i], i); } catch { out[i] = null; }
+        }
+    });
+    await Promise.all(workers);
+    return out;
+};
+
 // Main function to get streams for the addon
-async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
+async function get4KHDHubStreams(tmdbId, type, season = null, episode = null, signal = null) {
+    // Helper to check abort signal and throw if aborted
+    const checkAbort = () => {
+        if (signal?.aborted) {
+            const err = new Error('Aborted');
+            err.name = 'AbortError';
+            throw err;
+        }
+    };
+
     try {
         console.log(`[4KHDHub] Starting search for TMDB ID: ${tmdbId}, Type: ${type}${season ? `, Season: ${season}` : ''}${episode ? `, Episode: ${episode}` : ''}`);
+        checkAbort();
 
         // Create cache key for resolved file hosting URLs
         const cacheKey = `4khdhub_resolved_urls_v3_${tmdbId}_${type}${season ? `_s${season}e${episode}` : ''}`;
@@ -1661,9 +1809,10 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
         const cachedResolvedUrls = await getFromCache(cacheKey);
         if (cachedResolvedUrls && cachedResolvedUrls.length > 0) {
             console.log(`[4KHDHub] Cache HIT for ${cacheKey}. Using ${cachedResolvedUrls.length} cached resolved URLs.`);
+            checkAbort();
             // Process cached resolved URLs directly to final streaming links
             console.log(`[4KHDHub] Processing ${cachedResolvedUrls.length} cached resolved URLs to get streaming links.`);
-            streamingLinks = await extractStreamingLinks(cachedResolvedUrls);
+            streamingLinks = await extractStreamingLinks(cachedResolvedUrls, signal);
         } else {
             if (cachedResolvedUrls && cachedResolvedUrls.length === 0) {
                 console.log(`[4KHDHub] Cache contains empty data for ${cacheKey}. Refetching from source.`);
@@ -1676,6 +1825,7 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
 
             // Get TMDB details to get the actual title
             const tmdbDetails = await getTMDBDetails(tmdbId, tmdbType);
+            checkAbort();
             if (!tmdbDetails || !tmdbDetails.title) {
                 console.log(`[4KHDHub] Could not fetch TMDB details for ID: ${tmdbId}`);
                 return [];
@@ -1689,7 +1839,8 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
 
             // Primary search using the actual title
             const searchQuery = tmdbDetails.title;
-            searchResults = await searchContent(searchQuery);
+            searchResults = await searchContent(searchQuery, signal);
+            checkAbort();
             console.log(`[4KHDHub] Primary search found ${searchResults.length} results`);
 
             if (searchResults.length > 0) {
@@ -1704,7 +1855,8 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
                 const titleWithoutYear = removeYear(tmdbDetails.title);
                 if (titleWithoutYear !== tmdbDetails.title) {
                     console.log(`[4KHDHub] Trying search without year: "${titleWithoutYear}"`);
-                    const fallbackResults = await searchContent(titleWithoutYear);
+                    const fallbackResults = await searchContent(titleWithoutYear, signal);
+                    checkAbort();
                     if (fallbackResults.length > 0) {
                         const fallbackMatch = findBestMatch(fallbackResults, tmdbDetails.title, tmdbDetails.year);
                         if (fallbackMatch && (!bestMatch || fallbackMatch.score > bestMatch.score)) {
@@ -1722,8 +1874,10 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
                     ).filter(query => query !== tmdbDetails.title); // Exclude the original title we already tried
 
                     for (const altQuery of alternativeQueries) {
+                        checkAbort();
                         console.log(`[4KHDHub] Trying alternative search: "${altQuery}"`);
-                        const altResults = await searchContent(altQuery);
+                        const altResults = await searchContent(altQuery, signal);
+                        checkAbort();
                         if (altResults.length > 0) {
                             const altMatch = findBestMatch(altResults, tmdbDetails.title, tmdbDetails.year);
                             if (altMatch && (!bestMatch || altMatch.score > bestMatch.score)) {
@@ -1749,7 +1903,8 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
 
             console.log(`[4KHDHub] Using best match: ${bestMatch.title}`);
 
-            const content = await loadContent(bestMatch.url);
+            const content = await loadContent(bestMatch.url, signal);
+            checkAbort();
 
             let downloadLinks = [];
 
@@ -1777,32 +1932,29 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
             }
 
             // Resolve redirect URLs to actual file hosting URLs
+            // Concurrently, because each link is one (sometimes two) page fetches and a movie lists a dozen of
+            // them: the old sequential loop sat idle between requests and was the slowest provider call in the
+            // API at 16-24s. mapLimit keeps the link order stable, which the cache below depends on.
             console.log(`[4KHDHub] Resolving ${downloadLinks.length} redirect URLs to file hosting URLs...`);
-            const resolvedUrls = [];
-
-            for (let i = 0; i < downloadLinks.length; i++) {
-                const link = downloadLinks[i];
-                console.log(`[4KHDHub] Resolving link ${i + 1}/${downloadLinks.length}: ${link}`);
-
+            checkAbort();
+            const resolvedSlots = await mapLimit(downloadLinks, REDIRECT_CONCURRENCY, async (link, i) => {
+                checkAbort();
+                if (!link.toLowerCase().includes('id=')) return link;   // direct URL, use as-is
                 try {
-                    if (link.toLowerCase().includes('id=')) {
-                        // This is a redirect URL, resolve it
-                        const resolvedUrl = await getRedirectLinks(link);
-                        if (resolvedUrl && resolvedUrl.trim()) {
-                            console.log(`[4KHDHub] Link ${i + 1} resolved to: ${resolvedUrl}`);
-                            resolvedUrls.push(resolvedUrl);
-                        } else {
-                            console.log(`[4KHDHub] Link ${i + 1} resolution failed or returned empty`);
-                        }
-                    } else {
-                        // Direct URL, use as-is
-                        console.log(`[4KHDHub] Link ${i + 1} is direct URL: ${link}`);
-                        resolvedUrls.push(link);
+                    const resolvedUrl = await getRedirectLinks(link, signal);
+                    if (resolvedUrl && resolvedUrl.trim()) {
+                        console.log(`[4KHDHub] Link ${i + 1} resolved to: ${resolvedUrl}`);
+                        return resolvedUrl;
                     }
+                    console.log(`[4KHDHub] Link ${i + 1} resolution failed or returned empty`);
                 } catch (error) {
+                    if (error.name === 'AbortError') throw error;
                     console.error(`[4KHDHub] Error resolving link ${i + 1} (${link}):`, error.message);
                 }
-            }
+                return null;
+            });
+            checkAbort();
+            const resolvedUrls = resolvedSlots.filter(Boolean);
 
             if (resolvedUrls.length === 0) {
                 console.log(`[4KHDHub] No URLs resolved successfully`);
@@ -1815,7 +1967,7 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
 
             // Process resolved URLs to get final streaming links
             console.log(`[4KHDHub] Processing ${resolvedUrls.length} resolved URLs to get streaming links.`);
-            streamingLinks = await extractStreamingLinks(resolvedUrls);
+            streamingLinks = await extractStreamingLinks(resolvedUrls, signal);
         }
 
         // Filter out suspicious AMP/redirect URLs
@@ -1851,17 +2003,18 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
         console.log(`[4KHDHub] Processing ${uniqueLinks.length} unique links (${streamingLinks.length - filteredLinks.length} suspicious URLs filtered, ${filteredLinks.length - uniqueLinks.length} duplicates removed)`);
 
         // Validate URLs if DISABLE_4KHDHUB_URL_VALIDATION is false
+        checkAbort();
         let validatedLinks = uniqueLinks;
         const disableValidation = process.env.DISABLE_4KHDHUB_URL_VALIDATION === 'true';
 
         if (!disableValidation) {
             console.log(`[4KHDHub] URL validation enabled, validating ${uniqueLinks.length} links...`);
-            const validationPromises = uniqueLinks.map(async (link) => {
-                const isValid = await validateUrl(link.url);
+            // Use mapLimit for bounded concurrency and abort support
+            const validationResults = await mapLimit(uniqueLinks, 8, async (link) => {
+                checkAbort();
+                const isValid = await validateUrlCached(link.url, signal);
                 return isValid ? link : null;
             });
-
-            const validationResults = await Promise.all(validationPromises);
             validatedLinks = validationResults.filter(link => link !== null);
 
             console.log(`[4KHDHub] URL validation complete: ${validatedLinks.length}/${uniqueLinks.length} links are valid`);
@@ -1869,6 +2022,7 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
             console.log(`[4KHDHub] URL validation disabled, skipping validation`);
         }
 
+        checkAbort();
         // Normalize to generic stream object format
         let streams = validatedLinks.map(link => ({
             name: link.name, // Don't add prefix since it's already included
@@ -1909,6 +2063,10 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null) {
         return streams;
 
     } catch (error) {
+        if (error.name === 'AbortError') {
+            console.log(`[4KHDHub] Request aborted`);
+            return [];
+        }
         console.error(`[4KHDHub] Error getting streams:`, error.message);
         return [];
     }

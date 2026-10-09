@@ -1,6 +1,7 @@
 const { createDecipheriv } = require('crypto');
 const { getDetails, resolveImdbId } = require('../utils/tmdb');
 const { getEpisodesPerSeason } = require('../utils/cinemetaEpisodes');
+const episodeNumbering = require('../utils/episodeNumbering');
 const { findBestMatch } = require('../utils/titleMatch');
 const { tmdbTitleToImdbId } = require('../utils/tmdbTitleToImdb');
 
@@ -16,7 +17,9 @@ const FETCH_RETRIES = 2;
 const FETCH_RETRY_DELAY_MS = 400;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-const cache = new Map();
+// Capped: keyed per title/episode.
+const { BoundedTtlCache } = require('../utils/boundedCache');
+const cache = new BoundedTtlCache(1000);
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -168,17 +171,10 @@ function resolveQuality(quality) {
 
 async function resolveAbsoluteEpisode(imdbId, season, episode) {
     if (season <= 1) return episode;
-
     const episodesPerSeason = await getEpisodesPerSeason(imdbId);
-    if (episodesPerSeason.length < season - 1) return null;
-
-    let offset = 0;
-    for (let s = 0; s < season - 1; s++) {
-        const count = episodesPerSeason[s] ?? 0;
-        if (count === 0) return null;
-        offset += count;
-    }
-    return offset + episode;
+    // Shared with the anime provider and the metadata endpoint so all three agree. Null means "an earlier
+    // season's count is unknown", which the caller treats as "cannot resolve" rather than guessing.
+    return episodeNumbering.absoluteFromCountsArray(episodesPerSeason, season, episode);
 }
 
 async function getOnetouchtvStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {

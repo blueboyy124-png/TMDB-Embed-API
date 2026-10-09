@@ -4,10 +4,54 @@
 
 const cors = require('cors');
 const fetch = require('node-fetch');
+const http = require('http');
+const https = require('https');
+
+// One shared, bounded connection pool per upstream scheme.
+//
+// Why this matters with more than one user: node-fetch used a fresh socket per request with keep-alive
+// effectively off, so N simultaneous viewers meant N concurrent sockets AND N full TLS handshakes. Past a
+// few dozen that is where a server starts failing its own users -- upstream hosts rate-limit the burst, local
+// ephemeral ports and file descriptors run out, and requests queue behind each other until they time out.
+// That presents as "the site got glitchy with a few people watching".
+//
+// The caps are generous for a household/small server but bounded, and maxSockets queues rather than refusing,
+// so a spike degrades into waiting instead of errors. `timeout` stops a dead upstream from holding a socket
+// forever. DISABLE_KEEPALIVE=true restores the old per-request behaviour.
+const KEEPALIVE = process.env.DISABLE_KEEPALIVE !== 'true';
+const MAX_SOCKETS = Number(process.env.PROXY_MAX_SOCKETS) || 64;
+const FREE_SOCKET_TIMEOUT_MS = 15000;
+// NOTE: deliberately NO `timeout` here. An http.Agent's `timeout` only *emits* a 'timeout' event on the
+// socket; it does not abort the request, and with nothing listening the request hangs indefinitely instead of
+// failing. Setting it made every proxied fetch hang -- measured: the same manifest took 725ms direct and never
+// returned through the proxy. `freeSocketTimeout` is the safe variant: it only reaps sockets sitting IDLE in
+// the pool. Per-request timeouts already exist (node-fetch `timeout` at the call sites, and the aggregate's
+// own soft deadline), so the agent does not need one.
+const agentOptions = { keepAlive: KEEPALIVE, maxSockets: MAX_SOCKETS, maxFreeSockets: 16, freeSocketTimeout: FREE_SOCKET_TIMEOUT_MS };
+const httpAgent = new http.Agent(agentOptions);
+const httpsAgent = new https.Agent(agentOptions);
+// node-fetch reads the agent per-request, so it is threaded through explicitly at each call site.
+const agentFor = url => (String(url).startsWith('http://') ? httpAgent : httpsAgent);
 
 const CACHE_MAX_SIZE = 2000;
 const CACHE_EXPIRY_MS = 2 * 60 * 60 * 1000; // 2 hours
 const segmentCache = new Map();
+
+// Segment prefetch, bounded.
+//
+// A variant playlist lists every segment in the episode -- measured at 354 for One Piece S21E1. Serving it
+// used to fire ALL of them at once (Promise.all over the whole list), and that saturated the upstream: the
+// player's own request for the FIRST segment then queued behind 353 strangers and took 11.4s, where the same
+// request on an idle server took 43ms. That gap is the "3-8 seconds of spinner before video" symptom.
+//
+// So: a small worker pool, a short head-only window (the start is all a player needs to begin), and a hard
+// rule that a real request always wins the upstream. Background prefetch is a bonus, never a competitor.
+const PREFETCH_CONCURRENCY = 2;   // deliberately small; these hosts throttle badly under load
+const PREFETCH_HEAD_SEGMENTS = 4;  // only the first few segments matter for instant start
+const prefetchQueue = [];
+let prefetchActive = 0;
+let realRequestsInFlight = 0;      // while > 0, prefetch workers stand down
+
 // Track first open-ended (bytes=0-) range per target to clamp only once per TTL window
 const openRangeClampMap = new Map();
 const OPEN_RANGE_CLAMP_TTL_MS = 5 * 60 * 1000; // 5 minutes
@@ -59,12 +103,15 @@ function getCachedSegment(url) {
     return e;
 }
 
+// Pull one prefetched segment. Skipped entirely while a real request is in flight, and paused between
+// fetches, so background work can never be what delays the video the user actually asked for.
 async function prefetchSegment(url, headers) {
     if (isCacheDisabled() || segmentCache.size >= CACHE_MAX_SIZE) return;
     const existing = segmentCache.get(url);
     if (existing && Date.now() - existing.timestamp <= CACHE_EXPIRY_MS) return;
     try {
-        const resp = await fetch(url, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+        if (prefetchSuppressed()) return;                     // a real request outranks us
+        const resp = await fetch(url, { headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(url) });
         if (!resp.ok) return;
         const data = new Uint8Array(await resp.arrayBuffer());
         const responseHeaders = {};
@@ -72,6 +119,50 @@ async function prefetchSegment(url, headers) {
         segmentCache.set(url, { data, headers: responseHeaders, timestamp: Date.now() });
     } catch (_e) { /* ignore */ }
 }
+
+// Queue the head of a playlist for background warming. Anything past PREFETCH_HEAD_SEGMENTS is not queued:
+// the player only needs the start to begin, and fetching the tail speculatively is what caused the stall.
+function prefetchHead(segmentUrls, headers) {
+    if (isCacheDisabled() || !segmentUrls.length) return;
+    for (const url of segmentUrls.slice(0, PREFETCH_HEAD_SEGMENTS)) {
+        if (prefetchQueue.includes(url)) continue;
+        prefetchQueue.push(url);
+        if (prefetchQueue.length > PREFETCH_HEAD_SEGMENTS * 4) prefetchQueue.shift();  // bound memory
+    }
+    drainPrefetchQueue(headers);
+}
+
+async function drainPrefetchQueue(headers) {
+    while (prefetchActive < PREFETCH_CONCURRENCY && prefetchQueue.length) {
+        if (prefetchSuppressed()) { await sleep(120); continue; }   // yield to the player
+        const url = prefetchQueue.shift();
+        prefetchActive++;
+        prefetchSegment(url, headers)
+            .catch(() => undefined)
+            .then(() => { prefetchActive--; });
+    }
+}
+
+// Marks the start and end of a genuine client request, so prefetch can stand down while one is open.
+// Clamped at zero and paired with a staleness reset: if a 'close' were ever missed, a permanently positive
+// count would silently disable prefetching for the life of the process, which is far worse than a stale
+// prefetch. Correctness of playback must not depend on this counter staying exact.
+let realRequestStartedAt = 0;
+function beginRealRequest() { realRequestsInFlight++; realRequestStartedAt = Date.now(); }
+function endRealRequest() {
+  realRequestsInFlight = Math.max(0, realRequestsInFlight - 1);
+  if (realRequestsInFlight === 0) realRequestStartedAt = 0;
+}
+function prefetchSuppressed() {
+  // A request that has been "in flight" for minutes is a leak, not a slow client.
+  if (realRequestsInFlight > 0 && realRequestStartedAt && Date.now() - realRequestStartedAt > 30 * 1000) {
+    realRequestsInFlight = 0;
+    realRequestStartedAt = 0;
+  }
+  return realRequestsInFlight > 0;
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
@@ -117,9 +208,16 @@ function extractOriginalUrl(proxyUrl) {
 function rewriteM3u8(content, targetUrl, baseProxyUrl, headers) {
     const lines = content.split('\n');
     const out = []; const segmentUrls = [];
+    // Hosts like anixo serve variants and segments from the same extensionless path
+    // (/api/stream/m3u8?t=...), so the URL alone cannot say which it is. The line above it can: a URI on
+    // the line right after #EXT-X-STREAM-INF is another playlist, anything else on a bare line is media.
+    let afterVariantTag = false;
     for (const line of lines) {
         if (line.startsWith('#')) {
-            if (line.startsWith('#EXT-X-KEY:')) {
+            if (line.startsWith('#EXT-X-STREAM-INF:')) {
+                afterVariantTag = true;
+                out.push(line);
+            } else if (line.startsWith('#EXT-X-KEY:')) {
                 const regex = /https?:\/\/[^""\s]+/g; const keyUrl = regex.exec(line)?.[0];
                 if (keyUrl) {
                     const proxyUrl = `${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(keyUrl)}&headers=${encodeURIComponent(JSON.stringify(headers))}`;
@@ -139,17 +237,22 @@ function rewriteM3u8(content, targetUrl, baseProxyUrl, headers) {
         } else if (line.trim()) {
             try {
                 const abs = new URL(line, targetUrl).href;
-                if (/\.m3u8(\?|$)/i.test(abs)) {
+                // The old check demanded a dot before "m3u8", so extensionless playlist paths were left
+                // unproxied and the browser fetched them without the Referer the host requires (403).
+                if (afterVariantTag || /\.m3u8(\?|$)/i.test(abs)) {
                     out.push(`${baseProxyUrl}/m3u8-proxy?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}`);
-                } else if (/\.ts(\?|$)/i.test(abs)) {
+                } else {
                     segmentUrls.push(abs);
                     out.push(`${baseProxyUrl}/ts-proxy?url=${encodeURIComponent(abs)}&headers=${encodeURIComponent(JSON.stringify(headers))}`);
-                } else out.push(line);
+                }
+                afterVariantTag = false;
             } catch { out.push(line); }
         } else out.push(line);
     }
     if (segmentUrls.length && !isCacheDisabled()) {
-        Promise.all(segmentUrls.map(u => prefetchSegment(u, headers))).catch(() => undefined);
+        // Was: Promise.all(segmentUrls.map(prefetchSegment)) -- every segment in the episode (354 measured)
+        // fired at once, and the player's own first-segment request queued behind all of them for ~11s.
+        prefetchHead(segmentUrls, headers);
     }
     return out.join('\n');
 }
@@ -163,7 +266,7 @@ function createProxyRoutes(app) {
             // Ignore URL parsing errors
         }
         try {
-            const response = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+            const response = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(targetUrl) });
             if (!response.ok) return res.status(response.status).json({ error: `M3U8 fetch failed: ${response.status}` });
             const text = await response.text();
             const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
@@ -178,6 +281,10 @@ function createProxyRoutes(app) {
 
     // ts / key segment proxy
     app.get('/ts-proxy', cors(), async (req, res) => {
+        // A genuine player request. Prefetch workers stand down while any of these is open, so background
+        // warming can never be the reason the video the user clicked is slow to start.
+        beginRealRequest();
+        res.on('close', endRealRequest);
         const targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'URL parameter required' });
         const debug = req.query.debug === '1';
         const noSynth = req.query.noSynth === '1';
@@ -282,7 +389,7 @@ function createProxyRoutes(app) {
             let upstreamAcceptRanges = null;
             if (!effectiveRange) {
                 try {
-                    const headResp = await fetch(targetUrl, { method: 'HEAD', headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+                    const headResp = await fetch(targetUrl, { method: 'HEAD', headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(targetUrl) });
                     if (headResp.ok) {
                         contentLength = headResp.headers.get('content-length');
                         upstreamAcceptRanges = headResp.headers.get('accept-ranges');
@@ -298,7 +405,7 @@ function createProxyRoutes(app) {
                 try {
                     const probeRange = 'bytes=0-0';
                     if (debug) console.log('[ts-proxy] probe range');
-                    const probeResp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': probeRange } });
+                    const probeResp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': probeRange }, agent: agentFor(targetUrl) });
                     if (probeResp.status === 206) {
                         const cr = probeResp.headers.get('content-range');
                         if (cr) {
@@ -325,7 +432,7 @@ function createProxyRoutes(app) {
                     (async () => {
                         try {
                             if (debug) console.log('[ts-proxy] tail prefetch start', { tailRange });
-                            const tr = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, Range: tailRange } });
+                            const tr = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, Range: tailRange }, agent: agentFor(targetUrl) });
                             if (tr.status === 206) {
                                 const buf = Buffer.from(await tr.arrayBuffer());
                                 const cr = tr.headers.get('content-range');
@@ -353,7 +460,7 @@ function createProxyRoutes(app) {
                 const desired = initChunkKB * 1024;
                 const chunkSize = Math.min(desired, Math.max(0, total - 1));
                 const syntheticRange = `bytes=0-${chunkSize}`;
-                const resp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': syntheticRange } });
+                const resp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': syntheticRange }, agent: agentFor(targetUrl) });
                 if (resp.status === 206) {
                     if (debug) console.log('[ts-proxy] synthetic 206', syntheticRange);
                     const upstreamCT = inferContentType(resp.headers.get('content-type'), targetUrl);
@@ -371,7 +478,7 @@ function createProxyRoutes(app) {
                 // If server ignored range (e.g., returned 200), fall through to normal logic below.
             }
 
-            const upstreamOptions = { headers: { 'User-Agent': DEFAULT_UA, ...headers } };
+            const upstreamOptions = { headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(targetUrl) };
             // If client supplied a suffix range like bytes=0- we pass it; force200 strips Range
             if (force200 && headers.Range) delete headers.Range;
             const resp = await fetch(targetUrl, upstreamOptions);
@@ -400,7 +507,16 @@ function createProxyRoutes(app) {
             }
             if (cl) res.setHeader('Content-Length', cl);
             const acceptRanges = resp.headers.get('accept-ranges');
-            if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges); else res.setHeader('Accept-Ranges', 'bytes');
+            // Advertise seeking only when ranges actually work. If the client asked for a
+            // Range and the upstream answered 200, it ignored the Range: claiming
+            // `Accept-Ranges: bytes` there makes players (mpv especially) seek-spiral --
+            // every seek restarts a full multi-GB download and playback wedges. Saying
+            // nothing makes them stream progressively instead.
+            if (resp.status === 206) {
+                res.setHeader('Accept-Ranges', acceptRanges || 'bytes');
+            } else if (!effectiveRange) {
+                res.setHeader('Accept-Ranges', upstreamAcceptRanges || acceptRanges || 'bytes');
+            }
             const contentRange = resp.headers.get('content-range'); if (contentRange && !force200) res.setHeader('Content-Range', contentRange);
             res.setHeader('Cache-Control', 'public, max-age=3600');
             res.setHeader('Access-Control-Allow-Origin', '*');
@@ -416,7 +532,7 @@ function createProxyRoutes(app) {
             // Ignore URL parsing errors
         }
         try {
-            const resp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
+            const resp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(targetUrl) });
             if (!resp.ok) return res.status(resp.status).json({ error: `subtitle fetch failed: ${resp.status}` });
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Cache-Control', 'public, max-age=3600');

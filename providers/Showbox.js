@@ -14,8 +14,9 @@ const crypto = require('crypto');
 const DEFAULT_OSS_REGION = process.env.FEBBOX_REGION || 'USA7';
 console.log(`Using FebBox region setting: ${DEFAULT_OSS_REGION}`);
 
-// Global variable to store the user's region preference from the request
-global.currentRequestRegionPreference = null;
+// Region preference for the current request. Stored per request in utils/requestContext.js, NOT on `global`:
+// it used to be process-wide, so one user's region could leak into another's request.
+const { requestContext } = require('../utils/requestContext');
 
 // Add a global variable to track region availability
 global.regionAvailabilityStatus = {};
@@ -55,12 +56,20 @@ const getCookieForRequest = async (regionPreference = null, userCookie = null) =
         console.log(`[CookieManager] No region preference; defaulting to ${detectedOssGroup}`);
     }
 
-    global.lastRequestedRegion = { original: originalRegion, used: detectedOssGroup, usingFallback };
+    // Which region this request actually used. Per-request context: as a global, one user's fallback would be
+    // read by the next user's request and would mark a region available that they never tested.
+    // `regionAvailabilityStatus` stays a process-wide cache on purpose -- "is this region reachable" is a
+    // property of the region, not of a user, so sharing it is the point rather than a leak.
+    const rcRegion = requestContext();
+    if (rcRegion) rcRegion.lastRequestedRegion = { original: originalRegion, used: detectedOssGroup, usingFallback };
 
     // Select cookie (simplified legacy logic retained)
-    if (!baseCookieToUse && global.currentRequestConfig) {
+    // Per-request context, never a global. The old global.currentRequestConfig was one slot shared by the
+    // whole process, so two concurrent users overwrote each other's cookie mid-request.
+    const rc = requestContext();
+    if (!baseCookieToUse && rc) {
         try {
-            const array = Array.isArray(global.currentRequestConfig.cookies) ? global.currentRequestConfig.cookies.filter(Boolean) : [];
+            const array = Array.isArray(rc.cookies) ? rc.cookies.filter(Boolean) : [];
             if (array.length > 0) {
                 // Strip 'ui=' prefix if present — callers always prepend 'ui=' themselves
                 const raw = array[0];
@@ -72,9 +81,9 @@ const getCookieForRequest = async (regionPreference = null, userCookie = null) =
     }
 
     // Check if a base cookie has already been chosen and cached for this specific request cycle
-    if (global.currentRequestConfig && global.currentRequestConfig.chosenFebboxBaseCookieForRequest) {
+    if (rc && rc.chosenFebboxBaseCookieForRequest) {
         console.log(`[CookieManager] Re-using request-cached base cookie for this cycle.`);
-        baseCookieToUse = global.currentRequestConfig.chosenFebboxBaseCookieForRequest;
+        baseCookieToUse = rc.chosenFebboxBaseCookieForRequest;
     } else if (!baseCookieToUse) {
         // No request-cached cookie, so we need to select one.
         // 1. Prioritize user-supplied cookie passed directly to this function
@@ -82,10 +91,11 @@ const getCookieForRequest = async (regionPreference = null, userCookie = null) =
             console.log('[CookieManager] Using user-supplied cookie passed to function for this cycle.');
             baseCookieToUse = userCookie;
         }
-        // 2. Prioritize user-supplied cookie from global (fallback for backward compatibility)
-        else if (global.currentRequestUserCookie) {
-            console.log('[CookieManager] Using user-supplied cookie from global state (legacy mode) for this cycle.');
-            baseCookieToUse = global.currentRequestUserCookie;
+        // 2. Prioritize this request's own quota-selected cookie (was a process-wide global, which meant one
+        //    user's chosen cookie was visible to every other user).
+        else if (rc && rc.userCookie) {
+            console.log('[CookieManager] Using this request\'s quota-selected cookie.');
+            baseCookieToUse = rc.userCookie;
         }
         // No file-based fallback rotation (env-only)
         else {
@@ -94,8 +104,8 @@ const getCookieForRequest = async (regionPreference = null, userCookie = null) =
         }
 
         // Cache the chosen base cookie for this request cycle
-        if (global.currentRequestConfig) {
-            global.currentRequestConfig.chosenFebboxBaseCookieForRequest = baseCookieToUse;
+        if (rc) {
+            rc.chosenFebboxBaseCookieForRequest = baseCookieToUse;
             console.log(`[CookieManager] Cached base cookie for this request cycle.`);
         }
     }
@@ -1230,15 +1240,14 @@ const fetchSourcesForSingleFid = async (fidToProcess, shareKey, regionPreference
         const response = await axios.post(finalPostUrl, postDataForAxios, { ...axiosConfig, responseType: 'text' });
         const playerContent = response.data;
 
-        // Mark the region as available if the request succeeded
-        if (global.lastRequestedRegion && global.lastRequestedRegion.used) {
-            global.regionAvailabilityStatus[global.lastRequestedRegion.used] = true;
-            // If we successfully used a fallback, notify through a global flag
-            if (global.lastRequestedRegion.usingFallback) {
-                global.usedRegionFallback = {
-                    original: global.lastRequestedRegion.original,
-                    fallback: global.lastRequestedRegion.used
-                };
+        // Mark the region as available if the request succeeded. Reads THIS request's region, so a
+        // concurrent user's fallback cannot be credited to this one.
+        const rcAvail = requestContext();
+        const usedRegion = rcAvail && rcAvail.lastRequestedRegion;
+        if (usedRegion && usedRegion.used) {
+            global.regionAvailabilityStatus[usedRegion.used] = true;   // genuinely process-wide: region reachability
+            if (usedRegion.usingFallback && rcAvail) {
+                rcAvail.usedRegionFallback = { original: usedRegion.original, fallback: usedRegion.used };
             }
         }
 
@@ -1968,9 +1977,13 @@ const getStreamsFromTmdbId = async (tmdbType, tmdbId, seasonNum = null, episodeN
             console.log(`Processing FebBox URL: ${febboxUrl} (${baseStreamTitle})`);
 
             if (tmdbType === 'tv' && seasonNum !== null) {
-                // Call refactored processShowWithSeasonsEpisodes (which now returns streams)
+                // Call refactored processShowWithSeasonsEpisodes (which now returns streams).
+                // Guarded: several paths inside it can finish without returning a value, and spreading
+                // `undefined` here threw "tvStreams is not iterable", which aborted the WHOLE share and threw
+                // away every other stream it had found. One malformed share could blank out a title.
                 const tvStreams = await processShowWithSeasonsEpisodes(febboxUrl, baseStreamTitle, seasonNum, episodeNum, true, regionPreference, userCookie);
-                streamsFromThisShareInfo.push(...tvStreams);
+                if (Array.isArray(tvStreams)) streamsFromThisShareInfo.push(...tvStreams);
+                else console.warn(`[Showbox] processShowWithSeasonsEpisodes returned no array for ${febboxUrl}; skipping its streams`);
             } else {
                 // Handle movies or TV shows without season/episode specified
                 const { fids, shareKey, directSources } = await extractFidsFromFebboxPage(febboxUrl, regionPreference, userCookie);
@@ -2061,9 +2074,11 @@ const getStreamsFromTmdbId = async (tmdbType, tmdbId, seasonNum = null, episodeN
         return true;
     });
 
-    // Apply size limit if not using a personal cookie
+    // Apply size limit if not using a personal cookie. Reads this request's own cookie (was a global that
+    // leaked across users, so one user's personal cookie could disable the size limit for another).
     let finalFilteredStreams = streamsToShowBoxFiltered;
-    if (!userCookie && !global.currentRequestUserCookie) {
+    const rcSize = requestContext();
+    if (!userCookie && !(rcSize && rcSize.userCookie)) {
         console.log('[SizeLimit] No personal cookie detected. Applying 9GB size limit to ShowBox streams.');
         const NINE_GB_IN_BYTES = 9 * 1024 * 1024 * 1024;
         finalFilteredStreams = streamsToShowBoxFiltered.filter(stream => {
@@ -3044,16 +3059,17 @@ const getUiTokenForPStream = async (userCookie = null) => {
         return userCookie;
     }
 
-    // Check global cookie
-    if (global.currentRequestUserCookie && global.currentRequestUserCookie.startsWith('eyJ')) {
-        console.log('[PStream CookieManager] Using JWT token from global state');
-        return global.currentRequestUserCookie;
+    // This request's quota-selected cookie, if one has already been chosen.
+    const rc = requestContext();
+    if (rc && rc.userCookie && rc.userCookie.startsWith('eyJ')) {
+        console.log('[PStream CookieManager] Using JWT token from this request');
+        return rc.userCookie;
     }
 
-    // Try intelligent selection from cookies array if available
-    if (global.currentRequestConfig && Array.isArray(global.currentRequestConfig.cookies) && global.currentRequestConfig.cookies.length > 0) {
+    // Try intelligent selection from this request's cookie list if available
+    if (rc && Array.isArray(rc.cookies) && rc.cookies.length > 0) {
         try {
-            const candidates = global.currentRequestConfig.cookies.filter(Boolean);
+            const candidates = rc.cookies.filter(Boolean);
             const flowResults = await Promise.all(candidates.map(async (c) => {
                 try {
                     const headers = { 'Cookie': c.startsWith('ui=') ? c : `ui=${c}`, 'Accept': 'application/json, text/javascript, */*; q=0.01' };
@@ -3069,8 +3085,10 @@ const getUiTokenForPStream = async (userCookie = null) => {
             flowResults.sort((a, b) => (b.remainingMB - a.remainingMB));
             const best = flowResults[0];
             if (best && best.ok) {
-                global.currentRequestUserCookie = best.cookie;
-                global.currentRequestUserCookieRemainingMB = best.remainingMB;
+                // Recorded on this request's context only. These two were process-wide globals that were
+                // never cleared, so the cookie picked for one user stayed readable by every later request.
+                rc.userCookie = best.cookie;
+                rc.remainingMB = best.remainingMB;
                 console.log(`[PStream CookieManager] Selected best ui-token by remaining quota: ${best.remainingMB} MB`);
                 // Return JWT directly if it is JWT, otherwise return as-is
                 return best.cookie;

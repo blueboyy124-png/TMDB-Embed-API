@@ -6,7 +6,12 @@ const INITIAL_BASE = 'https://r1.zxcstream.xyz';
 const SALT = '3435443433';
 const SERVERS = ['icarus', 'berkas', 'orion', 'athena'];
 const BASE_TTL = 10 * 60 * 1000;
-const PROBE_SUBDOMAINS = ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'v4', 'cdn', 'api', 'stream'];
+const PROBE_SUBDOMAINS = ['r1', 'v4', 'cdn', 'api'];
+
+// Every network call here is bounded. Without these, one dead host holds the request open until the
+// client gives up, and because apiServer aggregates providers with a join, that single stall made the
+// whole /api/streams response take 50s for results that were ready in 5s.
+const TIMEOUT = { portal: 10000, verify: 6000, token: 8000, servers: 10000, total: 20000 };
 
 const F = {
     id: 'rgrwsdsdfgwrwrwwr',
@@ -28,6 +33,17 @@ const COMMON_HEADERS = {
 let _base = INITIAL_BASE;
 let _baseValidatedAt = 0;
 let discoveryPromise = null;
+// When every discovery route has failed AND the stale base then yields nothing, the whole site is down, not
+// just slow. That combination is deterministic and costs ~18s to rediscover (portal timeouts, then subdomain
+// probes, then four server calls against the dead base), so remembering it briefly turns the slowest provider
+// into a ~0ms one. Deliberately short: a host that comes back is picked up almost at once, and any success
+// clears this immediately. Absence of evidence is not treated as failure -- only a completed empty sweep is.
+let _deadUntil = 0;
+const DEAD_TTL_MS = 3 * 60 * 1000;
+// Set when a discovery attempt exhausted every route without finding a working base. This has to be its own
+// flag: getBase() stamps _baseValidatedAt even on the fallback path (it keeps the last known base), so that
+// timestamp cannot distinguish "discovered" from "gave up".
+let _discoveryFailedAt = 0;
 
 function sha512Hex(data) {
     return createHash('sha512').update(data).digest('hex');
@@ -71,6 +87,10 @@ async function probeSubdomain(sub) {
     return verifyBase(`https://${sub}.zxcstream.xyz`);
 }
 
+// r2-r6 and "stream" do not resolve at all (immediate DNS failure) and v4/cdn/api answer 404 on
+// /backend/token, so probing them only added latency to a path that rarely succeeds anyway. The portal
+// redirect is the working discovery route; this list is just a fallback for when a portal is down.
+
 async function discoverBase() {
     const portalResults = await Promise.allSettled(PORTALS.map((portal) => tryPortal(portal)));
     for (const r of portalResults) {
@@ -90,6 +110,7 @@ async function discoverBase() {
     }
 
     console.warn('[ZXCStreams] all discovery methods failed, keeping last known base:', _base);
+    _discoveryFailedAt = Date.now();
     return _base;
 }
 
@@ -136,7 +157,8 @@ async function requestServerToken(base, tmdbId, referer) {
             'Content-Type': 'application/json',
             Referer: referer
         },
-        body
+        body,
+        signal: AbortSignal.timeout(TIMEOUT.token)
     });
     if (!res.ok) throw new Error(`token failed ${res.status}`);
     const data = await res.json();
@@ -155,6 +177,9 @@ async function fetchServer(server, meta, type, season, episode) {
     try {
         tokenData = await requestServerToken(base, meta.tmdbId, referer);
     } catch (err) {
+        // One retry on a freshly discovered base. Discovery is already bounded, but cap the whole thing so a
+        // title the site simply does not carry cannot spend the caller's time rediscovering hosts.
+        if (err && err.name === 'TimeoutError') throw err;
         console.warn(`[ZXCStreams] token request failed on ${base}, re-discovering...`, err.message);
         invalidateBase();
         base = await getBase();
@@ -182,7 +207,8 @@ async function fetchServer(server, meta, type, season, episode) {
     const qs = new URLSearchParams(params).toString();
 
     const res = await fetch(`${base}/backend_/servers/${server}?${qs}`, {
-        headers: { ...COMMON_HEADERS, Origin: base, Referer: referer }
+        headers: { ...COMMON_HEADERS, Origin: base, Referer: referer },
+        signal: AbortSignal.timeout(TIMEOUT.servers)
     });
     if (!res.ok) return [];
     const data = await res.json();
@@ -236,6 +262,12 @@ function formatSize(bytes) {
 async function getZxcstreamsStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
     console.log(`[ZXCStreams] Fetching streams for TMDB ID: ${tmdbId}, Type: ${mediaType}`);
 
+    // Known-down short circuit, checked before the TMDB lookups so it really is free.
+    if (Date.now() < _deadUntil) {
+        console.log(`[ZXCStreams] site marked down for another ${Math.ceil((_deadUntil - Date.now()) / 1000)}s, skipping`);
+        return [];
+    }
+
     try {
         const type = mediaType === 'tv' ? 'tv' : 'movie';
         const tmdbType = mediaType === 'tv' ? 'tv' : 'movie';
@@ -261,11 +293,26 @@ async function getZxcstreamsStreams(tmdbId, mediaType = 'movie', seasonNum = nul
             imdbId
         };
 
-        const links = await getAllStreams(type, meta, seasonNum, episodeNum);
+        const sweepStartedAt = Date.now();
+        const links = await Promise.race([
+            getAllStreams(type, meta, seasonNum, episodeNum),
+            new Promise((resolve) => setTimeout(() => resolve([]), TIMEOUT.total))
+        ]);
         if (!links.length) {
+            // Only treat the site as down when discovery genuinely failed too, and never when we simply ran
+            // out of our own time budget -- a title that just takes longer than TIMEOUT.total says nothing
+            // about the site, and marking it down would hide it from every later request too.
+            const discoveryFailed = _discoveryFailedAt > 0;
+            const hitOurCeiling = Date.now() - sweepStartedAt >= TIMEOUT.total;
+            if (discoveryFailed && !hitOurCeiling) {
+                _deadUntil = Date.now() + DEAD_TTL_MS;
+                console.warn(`[ZXCStreams] no base could be discovered and no server answered; marking the site down for ${DEAD_TTL_MS / 1000}s`);
+            }
             console.log(`[ZXCStreams] No streams found for "${title}"`);
             return [];
         }
+        _deadUntil = 0;   // it answered, so whatever we concluded before no longer holds
+        _discoveryFailedAt = 0;
 
         const scored = links.map((l) => {
             const r = typeof l.resolution === 'number' ? l.resolution : 0;

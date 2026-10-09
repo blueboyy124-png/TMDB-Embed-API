@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stream test — One Piece S21E1</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<style>
+  :root { --bg:#0f131b; --panel:#1b2130; --line:#2c354a; --text:#e8ecf5; --dim:#8a94ab;
+          --good:#4fd6a0; --bad:#ff7a7a; --warn:#f2b134; --anime:#c98bff; --file:#6fb3ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+  main { max-width:1000px; margin:0 auto; padding:18px 16px 60px; display:grid; gap:12px; }
+  video { width:100%; background:#000; border-radius:8px; max-height:52vh; }
+  .bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; background:var(--panel); padding:10px 12px; border-radius:8px; }
+  h1 { font-size:1.05rem; margin:0; }
+  h1 small { color:var(--dim); font-weight:400; font-size:.8rem; }
+  button { background:var(--warn); color:#1a1300; border:0; border-radius:6px; padding:8px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); font-weight:400; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  a { color:var(--anime); }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border-radius:8px; font-size:.82rem; }
+  td, th { padding:6px 10px; text-align:left; border-bottom:1px solid var(--line); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  th { color:var(--dim); font-weight:500; }
+  tr.mkv td { opacity:.55; }
+  .kind { display:inline-block; padding:1px 7px; border-radius:99px; font-size:.7rem; text-transform:uppercase; letter-spacing:.04em; }
+  .kind.hls { background:rgba(79,214,160,.16); color:var(--good); }
+  .kind.file { background:rgba(111,179,255,.16); color:var(--file); }
+  .kind.mkv { background:rgba(255,122,122,.16); color:var(--bad); }
+  .kind.unknown { background:rgba(242,177,52,.16); color:var(--warn); }
+  .tag { display:inline-block; padding:1px 7px; border-radius:99px; font-size:.7rem; background:rgba(201,139,255,.16); color:var(--anime); }
+  .lang { display:inline-block; padding:1px 7px; border-radius:99px; font-size:.7rem; background:rgba(79,214,160,.16); color:var(--good); }
+  .lang.none { background:rgba(138,148,171,.14); color:var(--dim); }
+  .ep { display:flex; gap:12px; align-items:flex-start; background:var(--panel); padding:10px 12px; border-radius:8px; }
+  .ep img { width:150px; border-radius:6px; flex:none; }
+  .ep .txt { min-width:0; }
+  .ep h3 { margin:0 0 2px; font-size:1rem; }
+  .ep p { margin:4px 0 0; font-size:.82rem; color:var(--dim); }
+  .ep .meta { font-size:.74rem; color:var(--dim); margin-top:4px; }
+  .now { background:var(--panel); padding:10px 12px; border-radius:8px; font-size:.85rem; }
+  .now .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  pre { margin:0; background:var(--panel); padding:12px; border-radius:8px; max-height:220px; overflow:auto; font-size:.78rem; white-space:pre-wrap; }
+  .src { color:var(--dim); font-size:.74rem; }
+
+  /* --- what to test --- */
+  .ctl { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; background:var(--panel); padding:10px 12px; border-radius:8px; }
+  .ctl label { display:flex; flex-direction:column; gap:3px; font-size:.68rem; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .ctl input, .ctl select { background:#131926; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; font-size:.85rem; min-width:88px; }
+  .ctl input[type=number] { width:96px; }
+  .ctl input:focus, .ctl select:focus { outline:none; border-color:var(--warn); }
+  .ctl .grow { flex:1 1 auto; }
+  .quick { display:flex; gap:6px; flex-wrap:wrap; align-items:center; background:var(--panel); padding:8px 12px; border-radius:8px; }
+  .quick .grp { color:var(--dim); font-size:.68rem; text-transform:uppercase; letter-spacing:.05em; margin-right:2px; }
+  .quick button { background:transparent; color:var(--text); border:1px solid var(--line); font-weight:400; font-size:.78rem; padding:4px 10px; border-radius:99px; }
+  .quick button:hover { border-color:var(--warn); color:var(--warn); }
+  .quick button[aria-pressed="true"] { border-color:var(--warn); color:var(--warn); }
+
+  /* --- headline result: speed + whether the data actually arrived --- */
+  .verdict { display:flex; gap:14px; flex-wrap:wrap; align-items:center; background:var(--panel); padding:12px; border-radius:8px; }
+  .verdict .big { font-size:1.6rem; font-weight:700; font-variant-numeric:tabular-nums; line-height:1; }
+  .verdict .big small { font-size:.7rem; font-weight:400; color:var(--dim); display:block; margin-top:3px; letter-spacing:.04em; }
+  .verdict .who { min-width:0; flex:1 1 220px; }
+  .verdict .who h2 { margin:0 0 2px; font-size:1rem; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; font-size:.74rem; color:var(--dim); }
+  .stats b { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
+  .stats .sep { opacity:.45; }
+  .checks { display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { display:inline-flex; align-items:center; gap:4px; padding:2px 9px; border-radius:99px; font-size:.72rem; background:rgba(138,148,171,.14); color:var(--dim); }
+  .chip.yes { background:rgba(79,214,160,.16); color:var(--good); }
+  .chip.no { background:rgba(242,177,52,.16); color:var(--warn); }
+  .why { font-size:.74rem; color:var(--dim); margin-top:6px; }
+  .why.bad { color:var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar">
+    <h1>Stream test <small id="whats">— pick anything below</small></h1>
+    <button id="go">Load streams</button>
+  </div>
+
+  <!-- What to test. Kept to type + id + season/episode because that is all the API needs; anything else
+       (which providers cover it, how fast, whether the metadata arrived) is what this page reports back. -->
+  <form class="ctl" id="ctl" autocomplete="off">
+    <label>Type
+      <select id="type">
+        <option value="series">TV / Anime series</option>
+        <option value="movie">Movie</option>
+      </select>
+    </label>
+    <label>TMDB ID
+      <input id="tmdbid" type="number" min="1" step="1" value="37854" inputmode="numeric">
+    </label>
+    <label id="seWrap">Season
+      <input id="season" type="number" min="0" step="1" value="21" inputmode="numeric">
+    </label>
+    <label id="epWrap">Episode
+      <input id="episode" type="number" min="1" step="1" value="1" inputmode="numeric">
+    </label>
+    <label>Deadline (ms)
+      <input id="deadline" type="number" min="2000" step="1000" value="30000" inputmode="numeric">
+    </label>
+    <button type="submit" class="ghost" id="fillinfo">Fill from TMDB ID</button>
+  </form>
+
+  <!-- Presets, so "was it fast for anime / a show / a film" is one click rather than a lookup. -->
+  <div class="quick" id="quick">
+    <span class="grp">Anime</span>
+    <button type="button" data-p="37854:21:1">One Piece S21E1</button>
+    <button type="button" data-p="1429:4:1">Attack on Titan S4E1</button>
+    <button type="button" data-p="1100:1:1">Death Note S1E1</button>
+    <button type="button" data-p="16498:1:1">Cowboy Bebop S1E1</button>
+    <span class="grp">TV</span>
+    <button type="button" data-p="1396:1:1">Breaking Bad S1E1</button>
+    <button type="button" data-p="1399:1:1">Game of Thrones S1E1</button>
+    <button type="button" data-p="1628:1:1">Chernobyl S1E1</button>
+    <button type="button" data-p="1861:1:1">Better Call Saul S1E1</button>
+    <span class="grp">Movies</span>
+    <button type="button" data-m="545611">Everything Everywhere</button>
+    <button type="button" data-m="155">Dark Knight</button>
+    <button type="button" data-m="19404">Dilwale (Hindi)</button>
+    <button type="button" data-m="4935">Howl's Castle</button>
+  </div>
+
+  <!-- The two questions this page exists to answer: how fast, and did the data all arrive. -->
+  <div class="verdict" id="verdict">
+    <div class="big" id="vms">—<small>LOAD TIME</small></div>
+    <div class="who">
+      <h2 id="vtitle">Nothing loaded yet</h2>
+      <div class="stats" id="vstats"></div>
+      <div class="checks" id="vchecks"></div>
+      <div class="why" id="vwhy"></div>
+    </div>
+  </div>
+
+  <video id="v" controls playsinline preload="none"></video>
+  <div class="now" id="now">Nothing playing yet.</div>
+
+  <div class="ep" id="epinfo"></div>
+
+  <div class="row"><h1 style="font-size:1rem">Streams <span class="src" id="streamcount"></span></h1></div>
+  <table>
+    <thead><tr>
+      <th>Play</th><th>Title</th><th>Type</th><th>Provider</th><th class="num">Quality</th><th>Language</th><th>Tag</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div class="bar"><h1 style="font-size:.95rem">Log</h1><button class="ghost" id="clearlog">Clear</button></div>
+  <pre id="log"></pre>
+</main>
+<script>
+'use strict';
+// Minimal playback + speed + metadata-completeness check for ANY title: anime, a TV show, or a movie.
+// The page exists to answer three questions at once, because they used to need three different pages:
+//   1. does this stream actually PLAY in a browser  -> classify() below, then the Play buttons
+//   2. how FAST did the answer arrive              -> the big number, with stopReason so an early
+//                                                    return is not mistaken for a timeout
+//   3. did ALL the metadata arrive                 -> the checklist, so "it worked but had no description"
+//                                                    is visibly different from "it fully loaded"
+const $ = s => document.querySelector(s);
+const v = $('#v');
+const API = location.origin;                       // same origin that served this page: no hardcoded host
+
+// Default is One Piece S21E1 (TMDB 37854, absolute #892): the hardest case, since it is episode 892 of a
+// show TMDB numbers as S21E1, and it is the title the numbering work exists for.
+const DEFAULTS = { type: 'series', id: '37854', season: '21', episode: '1' };
+
+const q = {
+  get type() { return $('#type').value; },
+  get id() { return $('#tmdbid').value.trim(); },
+  get season() { return $('#season').value.trim(); },
+  get episode() { return $('#episode').value.trim(); },
+  get deadline() { return $('#deadline').value.trim(); }
+};
+
+// Movies have no season/episode, and sending them would be rejected (the API requires the two together).
+// Hiding the inputs as well as omitting the params keeps the form honest about what it is asking for.
+function syncForm() {
+  const isMovie = q.type === 'movie';
+  $('#seWrap').style.display = isMovie ? 'none' : '';
+  $('#epWrap').style.display = isMovie ? 'none' : '';
+  $('#whats').textContent = isMovie
+    ? `— movie, TMDB ${q.id || '…'}`
+    : `— TMDB ${q.id || '…'}, S${q.season || '?'}E${q.episode || '?'}`;
+}
+
+// Builds the request path from the form. Mirrors the API's own rules so an invalid combination is caught
+// here with a readable message instead of arriving as a 400.
+function buildPath() {
+  const id = q.id;
+  if (!/^\d+$/.test(id)) return { error: 'TMDB ID must be a positive whole number' };
+  const dl = q.deadline;
+  if (dl && (!/^\d+$/.test(dl) || Number(dl) < 2000)) return { error: 'Deadline must be at least 2000ms' };
+  if (q.type === 'movie') return { path: `/api/streams/movie/${id}?deadline=${dl || 30000}` };
+  const { season, episode } = q;
+  if (!/^\d+$/.test(season) || !/^\d+$/.test(episode)) return { error: 'Season and episode must both be whole numbers' };
+  if (Number(season) < 0 || Number(episode) < 1) return { error: 'Season must be 0+ and episode 1+' };
+  return { path: `/api/streams/series/${id}?season=${season}&episode=${episode}&deadline=${dl || 30000}` };
+}
+
+let hls = null;
+const log = m => { const el = $('#log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+$('#clearlog').onclick = () => { $('#log').textContent = ''; };
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+// ★ THE BUG THAT BROKE THE EARLIER VERSION OF THIS PAGE ★
+// With `enableProxy` on, the API rewrites every URL to  <origin>/m3u8-proxy?url=<encoded original>.
+// "m3u8-proxy" has NO DOT before "m3u8", so a bare /\.m3u8/ test does NOT match it. The old page concluded
+// "plain file", set video.src, and Chrome refused to decode HLS: controls showed, duration 0:00, no error.
+// Measured on this title: 20 of 20 streams misclassified. player.html calls this same trap
+// "INTEGRATION NOTE A"; resolver.js has the identical helper. Keep the three copies in sync.
+function isHlsUrl(u) {
+  if (typeof u !== 'string') return false;
+  return /\.m3u8(\?|#|$)/i.test(u)      // direct playlist:  https://host/path/master.m3u8?x
+      || /\/m3u8-proxy(\?|$)/i.test(u); // via our proxy:    <origin>/m3u8-proxy?url=...
+}
+
+// The URL the browser will actually fetch may hide the real one behind the proxy's ?url= param, and these
+// upstream links often have no file extension at all. Unwrap it so the extension test means something.
+function unwrap(u) {
+  const m = /[?&]url=([^&]+)/.exec(u);
+  if (m && /\/m3u8-proxy|\/ts-proxy/.test(u)) { try { return decodeURIComponent(m[1]); } catch { /* keep raw */ } }
+  return u;
+}
+
+// Four buckets, decided from the ORIGINAL url so an extension hidden behind the proxy is still seen.
+function classify(stream) {
+  const raw = String(stream.url || '');
+  const u = unwrap(raw);
+  if (/\.m3u8(\?|#|$)/i.test(u) || /\/m3u8-proxy(\?|$)/i.test(raw)) return { kind: 'hls', label: 'HLS' };
+  if (/\.mkv(\?|#|$)/i.test(u)) return { kind: 'mkv', label: 'MKV' };
+  if (/\.(mp4|webm|m4v|mov)(\?|#|$)/i.test(u)) return { kind: 'file', label: 'file' };
+  // No extension anywhere. The proxy route still tells us the truth: the API only sends playlists to
+  // m3u8-proxy and direct files to ts-proxy, even when the upstream path has no extension.
+  if (/\/ts-proxy(\?|$)/i.test(raw)) return { kind: 'file', label: 'file' };
+  if (/\/m3u8-proxy(\?|$)/i.test(raw)) return { kind: 'hls', label: 'HLS' };
+  return { kind: 'unknown', label: '?' };
+}
+
+// --- playback ---
+// Every failure path reports something. A silent no-op here is what made this page look "not working".
+//
+// Listeners are installed ONCE and read `current`, rather than being attached per click with a closure over
+// that click's stream. Per-click `once:true` listeners were a bug: a stream that neither loaded nor errored
+// left its listener attached, so the NEXT stream's error was also reported under the PREVIOUS stream's
+// provider name -- actively misleading when you are diagnosing which source is broken.
+let current = null;                 // the stream being played right now, for the shared listeners
+let startClock = 0;
+let startTimer = null;
+
+function stopHls() { if (hls) { try { hls.destroy(); } catch { /* already gone */ } hls = null; } }
+
+function report(kind2, text) {
+  const who = current ? current.provider : '?';
+  const kindLabel = current ? classify(current).label : '?';
+  log(`${kind2} ${who} ${kindLabel} — ${text}`);
+}
+
+// What the user experiences is time-to-first-frame, so that is what gets timed and reported.
+v.addEventListener('loadeddata', () => {
+  if (!current) return;
+  clearTimeout(startTimer);
+  log(`OK   ${current.provider} ${classify(current).label} first frame in ${Math.round(performance.now() - startClock)}ms`);
+});
+v.addEventListener('error', () => {
+  if (!current) return;
+  const e = v.error;
+  clearTimeout(startTimer);
+  const what = { 1: 'loading aborted', 2: 'network error', 3: 'decode error', 4: 'source not supported' }[e ? e.code : 0] || 'unknown error';
+  report('FAIL', `${what}${e && e.message ? ' (' + e.message + ')' : ''}`);
+});
+
+function play(stream) {
+  const { kind, label } = classify(stream);
+  if (kind === 'mkv') { log(`SKIP ${stream.provider}: MKV — no browser can decode it, nothing is broken.`); return; }
+
+  current = stream;
+  startClock = performance.now();
+  clearTimeout(startTimer);
+
+  $('#now').innerHTML = `<div class="t">${esc(stream.title || stream.name || stream.url)}</div>`
+    + `<div class="src">${esc(stream.provider || '?')} · ${esc(label)} · ${esc(stream.tag || 'untagged')} (${esc(stream.tagSource || '-')})</div>`;
+
+  stopHls();
+  v.pause();
+  v.removeAttribute('src');
+  v.load();
+  try { v.currentTime = 0; } catch { /* no media yet, nothing to reset */ }
+
+  // Nothing visible happens for a long time when a source is dead, so say so rather than spinning silently.
+  startTimer = setTimeout(() => report('FAIL', 'no first frame within 20s — source is stalled or dead'), 20000);
+
+  const kick = () => v.play().catch(() => log('autoplay blocked — press play on the video'));
+
+  if (kind === 'hls') {
+    if (window.Hls && Hls.isSupported()) {
+      hls = new Hls({
+        // Prefetch the first fragment as soon as it is parsed instead of after level selection finishes;
+        // player.html uses the same two settings. Everything else is left at the hls.js default.
+        startFragPrefetch: true,
+        maxBufferLength: 12
+      });
+      hls.on(Hls.Events.ERROR, (_e, data) => {
+        if (!data.fatal) return;                       // recoverable errors are normal during startup
+        clearTimeout(startTimer);
+        const kindName = data.type === Hls.ErrorTypes.NETWORK_ERROR ? 'network'
+          : data.type === Hls.ErrorTypes.MEDIA_ERROR ? 'media' : 'hls';
+        report('FAIL', `${kindName} — ${data.details}`);
+      });
+      // Play only once the manifest is parsed. Calling play() before this is what produced a misleading
+      // "autoplay blocked" message for streams that were in fact loading perfectly well.
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { log(`manifest parsed, requesting ${label}`); kick(); });
+      hls.loadSource(stream.url);
+      hls.attachMedia(v);
+      log(`load ${stream.provider} ${label} via hls.js`);
+    } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+      v.src = stream.url;                    // Safari plays HLS natively
+      log(`load ${stream.provider} ${label} via native HLS`);
+      kick();
+    } else {
+      clearTimeout(startTimer);
+      log('FAIL no HLS support: hls.js did not load and this browser cannot play HLS natively');
+    }
+  } else {
+    v.src = stream.url;                      // progressive file: the element handles it
+    log(`load ${stream.provider} ${label} via <video src>`);
+    kick();
+  }
+}
+
+// --- what counts as "all the data" ---
+// Checked against the response, not against what the page managed to display, so a gap in the API is
+// reported as a gap rather than hidden by the rendering. For a series this is the episode block; for a movie
+// there is no episode, so the same fields are checked at title level, which is where the API serves them.
+function completeness(body, isMovie) {
+  const m = body.metadata || {};
+  const ep = isMovie ? m : (m.episode || {});
+  const anilist = m.anilist || null;
+  return [
+    ['title', !!(ep.name || m.title || body.title)],
+    ['description', !!(ep.overview || m.overview || body.overview)],
+    ['still / poster', !!(ep.still || m.poster || body.poster_path)],
+    ['air / release date', !!(ep.airDate || m.releaseDate || body.release_date)],
+    // Absolute numbering is series-only, and only exists once the numbering resolver has run.
+    ['absolute episode', isMovie ? null : (ep.absoluteEpisode != null)],
+    ['tagged', Object.keys(body.tagCounts || {}).length > 0],
+    ['AniList cross-ref', isMovie ? null : !!anilist]
+  ];
+}
+
+const chip = (name, ok) => `<span class="chip ${ok === null ? '' : ok ? 'yes' : 'no'}">${ok === null ? '·' : ok ? '✓' : '✕'} ${esc(name)}</span>`;
+
+// Renders the headline: how long it took, what came back, and what was missing. The "why" line is the part
+// that turns a number into a diagnosis -- "stopped early, 4 providers still working" reads very differently
+// from "waited for all 14 providers and one of them is slow".
+function renderVerdict(body, elapsedMs, path) {
+  const isMovie = q.type === 'movie';
+  const streams = body.streams || [];
+  const t = body.timings || {};
+  const m = body.metadata || {};
+
+  $('#vms').innerHTML = `${Math.round(elapsedMs)}<small>ms TOTAL</small>`;
+  const titleText = (m.title || body.title || (isMovie ? 'Movie' : 'Series')) +
+    (isMovie ? '' : `  S${q.season}E${q.episode}`);
+
+  // Sources: which providers actually contributed, because a lone provider is the real reliability risk.
+  const byProvider = {};
+  streams.forEach(s => { const k = s.provider || '?'; byProvider[k] = (byProvider[k] || 0) + 1; });
+  const sourceList = Object.entries(byProvider).map(([k, n]) => `${k}×${n}`).join(', ');
+
+  $('#vtitle').textContent = titleText;
+  const playable = streams.filter(s => s.playableInBrowser !== false).length;
+  $('#vstats').innerHTML = [
+    `<span><b>${playable}</b> playable</span>`,
+    `<span><b>${Object.keys(byProvider).length}</b> sources</span>`,
+    `<span>providers <b>${t.providersMs ?? '—'}</b>ms</span>`,
+    `<span>settled <b>${t.settled ?? '—'}/${t.providerCount ?? '—'}</b></span>`,
+    body.stopReason ? `<span>stopped: <b>${esc(body.stopReason)}</b></span>` : ''
+  ].filter(Boolean).join('<span class="sep">·</span>');
+
+  const checks = completeness(body, isMovie);
+  $('#vchecks').innerHTML = checks.map(([n, ok]) => chip(n, ok)).join('');
+  const missing = checks.filter(([, ok]) => ok === false).map(([n]) => n);
+
+  const why = [];
+  if (!streams.length) {
+    why.push(`no streams — every provider came back empty for TMDB ${q.id}`);
+    const empty = Object.entries(body.providerStatus || {}).filter(([, s]) => s === 'empty').map(([k]) => k);
+    if (empty.length) why.push(`empty: ${empty.join(', ')}`);
+  } else {
+    why.push(sourceList || 'no provider attribution');
+    if (Object.keys(byProvider).length === 1) {
+      why.push(`⚠ single source (${Object.keys(byProvider)[0]}) — no redundancy if it goes down`);
+    }
+  }
+  if (body.stopReason === 'enough') why.push('returned early: already enough streams from enough sources');
+  if (body.stopReason === 'deadline') why.push(`⚠ hit the deadline; still working: ${(body.pending || []).join(', ') || 'none'}`);
+  $('#vwhy').innerHTML = why.map(esc).join(' · ');
+  $('#vwhy').className = 'why' + (!streams.length || body.stopReason === 'deadline' ? ' bad' : '');
+  return missing;
+}
+
+// --- load ---
+let loadToken = 0;      // a second click must not let an older response overwrite a newer one
+async function run() {
+  // Deliberately NOT disabling the Load button while the request is in flight. It used to be disabled, which
+  // meant an 8-second request left you unable to ask again -- and on a slow provider, unable to ask for
+  // anything else either. Superseded responses are already discarded by loadToken, so re-requesting is safe;
+  // being stuck is not.
+  const token = ++loadToken;
+  const t0 = performance.now();
+  const built = buildPath();
+  if (built.error) {
+    $('#vtitle').textContent = 'Invalid input';
+    $('#vwhy').textContent = built.error;
+    $('#vwhy').className = 'why bad';
+    $('#vms').innerHTML = '—<small>NOT SENT</small>';
+    log(`refused locally: ${built.error}`);
+
+    return;
+  }
+  const path = built.path;
+  log(`GET ${path}`);
+  $('#vms').innerHTML = '…<small>LOADING</small>';
+  try {
+    const res = await fetch(API + path, { cache: 'no-store' });
+    const body = await res.json();
+    if (token !== loadToken) return;                 // a newer request won; discard this answer
+    if (!res.ok || body.success === false) {
+      $('#vtitle').textContent = `HTTP ${res.status}`;
+      $('#vwhy').textContent = body.error || 'request failed';
+      $('#vwhy').className = 'why bad';
+      $('#vms').innerHTML = `${Math.round(performance.now() - t0)}<small>ms (FAILED)</small>`;
+      log(`FAILED: HTTP ${res.status} ${body.error || ''}`);
+
+      return;
+    }
+    const streams = body.streams || [];
+    const elapsed = performance.now() - t0;
+    const t = body.timings || {};
+    const missing = renderVerdict(body, elapsed, path);
+    log(`${streams.length} streams in ${Math.round(elapsed)}ms`
+      + ` (providers ${t.providersMs}ms, settled ${t.settled}/${t.providerCount}, stop=${body.stopReason})`
+      + (body.partial ? ` partial, pending: ${(body.pending || []).join(', ')}` : '')
+      + ` tags: ${JSON.stringify(body.tagCounts || {})}`);
+    if (missing.length) log(`metadata missing: ${missing.join(', ')} — the streams still work, the labels are just thin`);
+
+    const counts = { hls: 0, file: 0, mkv: 0, unknown: 0 };
+    streams.forEach(s => { counts[classify(s).kind]++; });
+    log(`classified: ${counts.hls} HLS, ${counts.file} file, ${counts.mkv} MKV, ${counts.unknown} unknown`);
+    if (counts.unknown) log('note: unknown-type streams have no usable extension — try them, they may still work');
+
+    // These now live ONCE at metadata.episode rather than repeated on all 20 streams (they are identical on
+    // every one, and cost 28% of the payload). Add &perStreamMeta=1 to the request below to get the old
+    // per-stream shape back.
+    const ep = (body.metadata && body.metadata.episode) || {};
+    const epName = ep.name || null;
+    const epDesc = ep.overview || null;
+    const epStill = ep.still || null;
+    const epMeta = [];
+    if (ep.airDate) epMeta.push(`aired ${ep.airDate}`);
+    if (ep.absoluteEpisode != null) epMeta.push(`absolute #${ep.absoluteEpisode}`);
+    if (body.metadata && body.metadata.anilist) epMeta.push(`AniList #${body.metadata.anilist.id}`);
+    $('#epinfo').innerHTML = (epName || epDesc || epStill)
+      ? (epStill ? `<img src="${esc(epStill)}" alt="" loading="lazy">` : '') +
+        `<div class="txt">${epName ? `<h3>${esc(epName)}</h3>` : ''}` +
+        `${epDesc ? `<p>${esc(epDesc)}</p>` : ''}` +
+        `${epMeta.length ? `<div class="meta">${esc(epMeta.join(' · '))}</div>` : ''}</div>`
+      : '';
+
+    if (!streams.length) { $('#rows').innerHTML = '<tr><td colspan="7" class="src">No streams returned.</td></tr>'; return; }
+    $('#rows').innerHTML = streams.map((s, i) => {
+      const { kind, label } = classify(s);
+      const btnHtml = kind === 'mkv'
+        ? '<button disabled title="No browser can decode MKV">n/a</button>'
+        : `<button data-i="${i}">Play</button>`;
+      const raw = unwrap(String(s.url || ''));
+      // Language is only claimed when the source said so; "—" is the honest answer for everything else.
+      const lang = s.languageLabel
+        ? `<span class="lang">${esc(s.languageLabel)}</span>`
+        : '<span class="lang none">—</span>';
+      // The provider's own title is kept in sourceTitle, so show what it was when we replaced it.
+      const was = s.sourceTitle && s.sourceTitle !== s.title
+        ? `<div class="src" title="the provider's own title">was: ${esc(s.sourceTitle)}</div>` : '';
+      return `<tr class="${kind === 'mkv' ? 'mkv' : ''}">
+        <td>${btnHtml}</td>
+        <td>${esc(s.title || s.name)}${was}<div class="src">${esc(raw.slice(0, 90))}</div></td>
+        <td><span class="kind ${kind}">${esc(label)}</span></td>
+        <td>${esc(s.provider || '—')}</td>
+        <td class="num">${esc(s.quality || '—')}</td>
+        <td>${lang}</td>
+        <td>${s.tag ? `<span class="tag">${esc(s.tag)}</span>` : '—'}</td></tr>`;
+    }).join('');
+    $('#rows').querySelectorAll('button[data-i]').forEach(b => b.onclick = () => play(streams[Number(b.dataset.i)]));
+  } catch (e) {
+    log(`FAILED to load: ${e.message}`);
+  } finally {
+
+  }
+}
+
+// --- wiring ---
+// Buttons outside the form must not submit it.
+$('#go').onclick = run;
+$('#ctl').addEventListener('submit', e => { e.preventDefault(); run(); });
+['#type', '#tmdbid', '#season', '#episode', '#deadline'].forEach(s => {
+  $(s).addEventListener('input', syncForm);
+  $(s).addEventListener('change', syncForm);
+});
+
+function applyPreset(btn) {
+  if (btn.dataset.m) {                                   // a movie
+    $('#type').value = 'movie';
+    $('#tmdbid').value = btn.dataset.m;
+  } else {                                               // "id:season:episode"
+    const [id, season, episode] = btn.dataset.p.split(':');
+    $('#type').value = 'series';
+    $('#tmdbid').value = id;
+    $('#season').value = season;
+    $('#episode').value = episode;
+  }
+  document.querySelectorAll('#quick button').forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
+  syncForm();
+  run();
+}
+document.querySelectorAll('#quick button').forEach(b => b.addEventListener('click', () => applyPreset(b)));
+
+// "Fill from TMDB ID" asks the API what that id actually is, so a typo or a wrong type is corrected before a
+// 20s request rather than after. TMDB answers in milliseconds and it is cached, so this is effectively free.
+$('#fillinfo').onclick = async () => {
+  const id = q.id;
+  if (!/^\d+$/.test(id)) { log('cannot look up: TMDB ID must be a number'); return; }
+  const btn = $('#fillinfo');
+  btn.disabled = true;
+  try {
+    for (const type of ['series', 'movie']) {
+      const r = await fetch(`${API}/api/metadata/${type}/${id}`, { cache: 'no-store' });
+      if (!r.ok) continue;
+      const j = await r.json();
+      if (!j || !j.title) continue;
+      $('#type').value = type;
+      // Fill season/episode with the first real episode so the form is immediately submittable. The episode
+      // list is the reliable source for "what episodes exist" -- guessing S1E1 on a show whose season 1 is
+      // all specials produces a confident wrong answer.
+      let season = '', episode = '';
+      const eps = (j.episodes && Array.isArray(j.episodes)) ? j.episodes : [];
+      const first = eps.find(e => (e.seasonNumber ?? e.season) >= 1 && (e.episodeNumber ?? e.episode) >= 1);
+      if (first) { season = first.seasonNumber ?? first.season; episode = first.episodeNumber ?? first.episode; }
+      if (season !== '') { $('#season').value = season; $('#episode').value = episode; }
+      log(`looked up ${id}: "${j.title}" → ${type}`);
+      break;
+    }
+    syncForm();
+  } catch (e) {
+    log(`lookup failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+syncForm();
+run();
+</script>
+</body>
+</html>

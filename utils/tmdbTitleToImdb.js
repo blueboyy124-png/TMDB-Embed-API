@@ -8,7 +8,9 @@ const { findBestMatch } = require('./titleMatch');
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 
-const cache = new Map();
+// Capped: keyed by "title|year|type", so a title search across a catalogue grew this without limit.
+const { BoundedTtlCache } = require('./boundedCache');
+const cache = new BoundedTtlCache(2000);
 const TTL = 24 * 60 * 60 * 1000;
 
 async function tmdbTitleToImdbId(title, year, type) {

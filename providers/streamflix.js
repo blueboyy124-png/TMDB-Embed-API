@@ -9,7 +9,9 @@ const EPISODES_TTL = 60 * 60 * 1000;
 
 let dataCache = null;
 let configCache = null;
-const episodesCache = new Map();
+// Capped: keyed per show/season.
+const { BoundedTtlCache } = require('../utils/boundedCache');
+const episodesCache = new BoundedTtlCache(1000);
 
 const REQUEST_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',

@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { pickPrimaryLanguage } = require('../utils/streamMeta');
 
 const BASE_URL = 'https://vixsrc.to';
 const VIXSRC_HEADERS = {
@@ -108,7 +109,7 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         if (res > bestResolution) bestResolution = res;
     }
 
-    if (bestResolution === 0) return { sources: [], subtitles: [] };
+    if (bestResolution === 0) return { sources: [], subtitles: [], audioTracks };
 
     sources.push({
         name: `Vixsrc - ${bestResolution}p`,
@@ -122,7 +123,7 @@ function parsePlaylist(content, masterUrl, pageApiUrl) {
         }
     });
 
-    return { sources, subtitles };
+    return { sources, subtitles, audioTracks };
 }
 
 async function getVixsrcStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
@@ -166,15 +167,27 @@ async function getVixsrcStreams(tmdbId, mediaType = 'movie', seasonNum = null, e
         return [];
     }
 
-    const { sources, subtitles } = parsePlaylist(playlistContent, masterUrl, apiUrl);
+    const { sources, subtitles, audioTracks } = parsePlaylist(playlistContent, masterUrl, apiUrl);
 
     if (sources.length === 0) {
         console.log('[Vixsrc] No streams found in HLS playlist');
         return [];
     }
 
-    console.log(`[Vixsrc] Successfully extracted ${sources.length} stream(s). Subtitles: ${subtitles.length}`);
+    // Audio renditions were parsed all along and thrown away. Attach the language so vixsrc reports one like
+    // every other provider, and keep the full list because a manifest with several renditions is genuinely
+    // multi-language and a client may want to know that.
+    const lang = pickPrimaryLanguage(audioTracks);
+    for (const s of sources) {
+      if (lang.language) { s.language = lang.language; s.languageLabel = lang.languageLabel; }
+      if (lang.audioTracks && lang.audioTracks.length) s.audioTracks = lang.audioTracks;
+    }
+
+    console.log(`[Vixsrc] Successfully extracted ${sources.length} stream(s). Subtitles: ${subtitles.length}. Audio: ${(audioTracks || []).map(t => t.language).join(',') || 'none'}${lang.language ? ` -> ${lang.language}` : ''}`);
     return sources;
 }
 
-module.exports = { getVixsrcStreams };
+// parsePlaylist is exported for testing. It is a pure function, and it is the only place the audio-rendition
+// language is read out of the manifest -- the behaviour that was silently dropped, so it needs a test that
+// does not depend on vixsrc.to being up.
+module.exports = { getVixsrcStreams, parsePlaylist };

@@ -167,6 +167,11 @@ If both `TMDB_API_KEY` and `TMDB_API_KEYS` are provided, rotation uses the array
 | `DISABLE_URL_VALIDATION` | Skip general URL checks | Default `false` |
 | `DISABLE_4KHDHUB_URL_VALIDATION` | Skip 4khdhub URL checks | Default `false` |
 | `ENABLE_PROXY` | Mount proxy routes | Default `false` |
+| `PROVIDER_TIMEOUT_MS` | Hard per-provider ceiling | Default `45000`; `PROVIDER_TIMEOUT_<NAME>_MS` per provider |
+| `AGGREGATE_SOFT_DEADLINE_MS` | Soft deadline for the aggregate endpoint | Default `20000`; also `?deadline=ms` per request |
+| `AGGREGATE_ENOUGH_STREAMS` | Streams needed before the aggregate returns early | Default `12`; `&wait=1` per request opts out |
+| `AGGREGATE_ENOUGH_PROVIDERS` | **Distinct** providers needed for that early return | Default `3` |
+| `4KHDHUB_VALIDATION_CACHE_MS` | How long a validated 4khdhub link is trusted | Default `3600000` (1h); links are presigned for 8h |
 | `PROVIDER_CHECK_TMDB_ID` | Title for dashboard functional checks | Default `278` |
 | `SHOWBOX_CACHE_DIR` | Custom Showbox cache directory | Optional |
 | `NETMIRROR_API_BASE` | NetMirror embed base URL | Optional override |
@@ -318,12 +323,14 @@ The system automatically:
 | `GET /api/status` | Metrics + providers + endpoints + `providerCheckTmdbId` |
 | `GET /api/providers` | All providers with enabled status |
 | `GET /api/providers/:name` | Single provider status |
-| `GET /api/streams/:type/:tmdbId` | Aggregate streams (`type` = movie\|series; supports `?season=&episode=`) |
+| `GET /api/streams/:type/:tmdbId` | Aggregate streams (`type` = movie\|series; supports `?season=&episode=&deadline=&perStreamMeta=`) |
 | `GET /api/streams/:provider/:type/:tmdbId` | Provider-specific streams (same query params) |
-| `GET /api/config` | `{ merged, override, overridePath }` |
-| `POST /api/config` | Apply override patch (persisted to `utils/user-config.json`) |
+| `GET /api/metadata/:type/:tmdbId` | Merged TMDB + AniList title metadata |
+| `GET /api/metadata/:type/:tmdbId/episodes` | Episode list with numbering details (`?season=`) |
+| `GET /api/config` | `{ merged, override, overridePath }`. Secret values are **masked**; presence is reported via `hasTmdbApiKeys` / `hasFebboxCookies` |
+| `POST /api/config` | Apply override patch (persisted to `utils/user-config.json`). **Requires a session** — it changes server behaviour for everyone |
+| `GET /api/debug/env` | Debug environment/config snapshot. **Requires a session**; the selected FebBox cookie is masked |
 | `POST /api/restart` | Graceful restart (writes `restart.trigger` + exits) |
-| `GET /api/debug/env` | Debug environment/config snapshot |
 
 Proxy routes (mounted only when `enableProxy` is on):
 | Endpoint | Description |
@@ -333,6 +340,134 @@ Proxy routes (mounted only when `enableProxy` is on):
 | `GET /sub-proxy?url=...` | Subtitle passthrough proxy |
 
 The aggregate endpoint auto-resolves IMDb when needed, merges all enabled (or `defaultProviders`) provider output, then applies filtering. Provider timing is returned per provider (`providerTimings`).
+
+> **Testing by hand:** open `http://<host>:8787/test-player.html`. Pick a **type** (TV/anime series or movie), a **TMDB id** and — for a series — a season and episode, or click one of the presets (anime / TV / films). It reports three things at once:
+> - **how fast** — total ms, with `stopReason` so a deliberate early return is not mistaken for a timeout
+> - **which sources** contributed — a lone provider is flagged inline as "no redundancy if it goes down"
+> - **whether all the data arrived** — a per-field checklist (title, description, still, date, absolute #, tag, AniList), so "it worked but has no description" looks different from "it fully loaded"
+>
+> It then lists every stream with a Play button and logs why anything fails. MKV rows are disabled with the reason given, because no browser decodes MKV and a dead button is worse than an honest one. "Fill from TMDB ID" asks the API what an id actually is, so a wrong type or stale season is corrected before you wait rather than after; invalid input is refused in the page instead of becoming a 20s round trip to a 400.
+>
+> **Writing your own player?** Detect HLS with *both* patterns:
+> ```js
+> function isHlsUrl(u) {
+>   if (typeof u !== 'string') return false;
+>   return /\.m3u8(\?|#|$)/i.test(u) || /\/m3u8-proxy(\?|$)/i.test(u);
+> }
+> ```
+> With `enableProxy` on, every stream is rewritten to `<host>/m3u8-proxy?url=...` and **`m3u8-proxy` has no dot before `m3u8`**, so a bare `/\.m3u8/` test never matches. You then hand an HLS playlist to `<video src>`, Chrome cannot decode it, and the symptom is controls with `0:00` and no error. The same misjudgement also breaks stream ranking and `.mkv` detection. `public/player.html` (INTEGRATION NOTE A) and `public/resolver.js` carry the same helper — keep the copies in sync.
+
+### Soft deadline (partial results)
+
+The aggregate is not held hostage by its slowest provider. It answers after `AGGREGATE_SOFT_DEADLINE_MS` (default **20000**) with everything that has arrived so far:
+
+```json
+{
+  "count": 28,
+  "partial": true,
+  "pending": ["4khdhub", "anime"],
+  "providerStatus": { "vixsrc": "ok", "4khdhub": "pending" },
+  "timings": { "totalMs": 8157, "providersMs": 8153, "deadlineMs": 8000, "settled": 11, "providerCount": 14 }
+}
+```
+
+- `partial: true` means some providers had not finished; their streams are simply **not** in that response, so re-request with a larger budget to collect them.
+- `providerStatus` is per provider: `ok` | `empty` | `timeout` | `error` | `disabled` | `pending`.
+- `?deadline=ms` overrides per request (clamped to 2s–45s), e.g. `/api/streams/series/1429?season=2&episode=1&deadline=40000`.
+
+### Early return once the answer is good
+
+The soft deadline is the "too long" limit, but waiting it out when the response was already complete is just
+as bad as having no limit at all — a 26-title sweep had a **median of 12.6s and a p90 of 17.8s**, almost all of
+it spent waiting on providers long after 30+ playable streams were in hand.
+
+So the aggregate returns as soon as it has `AGGREGATE_ENOUGH_STREAMS` (12) from `AGGREGATE_ENOUGH_PROVIDERS`
+(**3, and the distinct count is the point** — three providers returning one stream each is three chances to
+be wrong, and would defeat the purpose of aggregating 14 of them).
+
+Measured over the same 26 titles: **median 12,647ms → 2,260ms, p90 17,821ms → 6,291ms**, coverage unchanged at
+26/26.
+
+- `stopReason` on the response says why it left: `complete`, `enough` (left early on purpose — **not** a
+  timeout), or `deadline` (genuinely ran out of time). Note `partial: true` now accompanies a deliberate early
+  return too, so use `stopReason` rather than `partial` to distinguish.
+- `&wait=1` waits for every provider regardless.
+
+### Per-episode metadata
+
+The episode's name, description, still, air date and absolute number are **identical on every stream in a
+response**, so they are not repeated per stream. They are served once:
+
+- aggregate: `metadata.episode` (unchanged, already existed)
+- per-provider: a top-level `episode` object
+
+`?perStreamMeta=1` puts them back on every stream for clients that want the older shape. The keys stay
+present-and-null by default, so reading `stream.description` never throws. This is ~28% of the payload; with
+gzip on top, a 21-stream response went from 34KB to 4.9KB.
+
+### Browse and search
+
+The API is no longer streams-only — a client no longer has to already know a TMDB id.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/search?q=` | TMDB multi search. `&page=1..10`. Returns `{ query, totalResults, results[] }` trimmed to what a picker renders |
+| `GET /api/trending` | `?window=day\|week` (default `week`) |
+
+Each result is `{ id, type: movie\|series, title, overview, poster, year, rating }`. Both are cached with the
+same bounded cache and share the same TMDB 429 cool-off as every other TMDB call, so a search box that fires
+a request per keystroke cannot rate-limit the server. A TMDB rate limit answers `503 UPSTREAM_RATE_LIMITED`
+rather than an empty result set — an empty grid reads as "no such title" and sends you looking for a typo.
+
+### Stream playback facts
+
+`container` and `playableInBrowser` are now set on every stream, centrally in `utils/streamMeta.js`.
+
+Both fields were previously **absent from every response**, and since clients test `playableInBrowser !== false`,
+an absent field read as "yes, playable" — so 2160p MKV streams were advertised as playable. On one movie that
+was **5 of 12 streams**, including the only 4K one. Matroska cannot be decoded by any browser or any Roku, so
+those all ended in a black screen. Clients that rank on `playableInBrowser === false` (including
+`my-anime-site`, which applies a 100000 penalty on it) had that penalty silently never fire.
+
+`container` is `m3u8`, `mp4`, `mkv`, … and is derived through the proxy URL, because with `enableProxy` the
+client only ever sees `<origin>/ts-proxy?url=<encoded .mkv>`.
+
+### Link health — dead links are no longer handed out
+
+`utils/linkHealth.js` probes every stream before the response is sent and drops the ones that do not work.
+
+This fixes a bug that made two separate symptoms look like one thing. Providers return *links*, not playable
+files. DahmerMovies answered with **five streams per title, all HTTP 403** — an expired presigned URL — and
+Vidlink and VaPlayer had their own variants. Nothing noticed, so a response looked healthy (12 streams, 5 of
+them advertised as 4K) and only failed when you pressed play. Because the dead entries were the 4K ones, they
+sat at the top of the list *looking like the best options*. That is why "the provider gets nothing" and "it
+doesn't look 4K" turned out to be the same defect: the real 2160p from Febbox was playable the whole time,
+buried under dead 4K rows from a provider that was serving nothing.
+
+- **Probed, then dropped.** `HEAD` first, and a ranged `GET` fallback when a server answers 405 to `HEAD`
+  (which would otherwise read as a dead link).
+- **Cached, so it is cheap.** 10 minutes per verdict, in a bounded cache. A repeat request for the same title
+  costs nothing. The TTL is deliberately short: Vidlink alternates between 200 and 429, so a long "alive" TTL
+  freezes one lucky moment and hands out dead links for the rest of the hour.
+- **Circuit breaker.** A provider is skipped entirely for 10 minutes once **3 of its probed links are ≥80% dead**.
+  It needs a *proven* failure — one bad link never disables anything, and a healthy provider is never accused.
+  Both DahmerMovies and VaPlayer now trip and are skipped, which also removes their latency.
+- **Manifests are probed too.** That was originally wrong and the test caught it: VaPlayer returns `.m3u8`
+  manifests the proxy answers with 500, and skipping them let three dead streams survive on every title.
+- Responses carry `linkCheck: { checked, dead, cached, byProvider }`. **`dead > 0` is healthy** — it means the
+  API is not handing you links that 403. `byProvider` names who, which is how "this site is down" is told
+  apart from "this site doesn't carry this title".
+
+Set `LINK_ALIVE_TTL_MS`, `LINK_PROBE_TIMEOUT_MS`, `LINK_BREAKER_RATIO`, `LINK_BREAKER_COOLDOWN_MS` to tune, or
+disable with `verifyLinkHealth: false`.
+
+### Season/episode validation
+
+`season` and `episode` must be plain non-negative integers, and must be supplied together. Season `0` is
+allowed (TMDB uses it for specials). Anything else — `abc`, `-5`, `2.5`, `1e3`, `0x10` — is rejected with
+`400 INVALID_SEASON_EPISODE` rather than falling back to season 1, which used to return streams for the wrong
+episode while reporting `success: true`.
+- `AGGREGATE_SOFT_DEADLINE_MS` changes the default. The hard per-provider ceiling is separate (`PROVIDER_TIMEOUT_MS`, default 45000, or `PROVIDER_TIMEOUT_<NAME>_MS` per provider) and still applies, so one hung provider cannot stall a response indefinitely.
 
 ---
 
@@ -344,6 +479,19 @@ The aggregate endpoint auto-resolves IMDb when needed, merges all enabled (or `d
   "url": "https://stream.url/video.mp4",
   "quality": "1080p",
   "provider": "yourprovider",
+  "tag": "anime",
+  "tags": ["anime"],
+  "tagSource": "provider",
+  "title": "The Land of Wano! To the Samurai Country where Cherry Bloss…",
+  "sourceTitle": "One Piece S21E01 (1999) 1080p | 2.05 GB | Castle",
+  "episodeName": "The Land of Wano! To the Samurai Country where Cherry Blossoms Flutter!",
+  "description": "A mysterious country, a rampaging slasher, ancient samurai rituals of seppuku...",
+  "still": "https://image.tmdb.org/t/p/w300/bCkiDB9SmyXGozQyJfk7jzlC5iD.jpg",
+  "airDate": "2019-07-07",
+  "absoluteEpisode": 892,
+  "track": "sub",
+  "language": "ja",
+  "languageLabel": "Japanese",
   "headers": { "User-Agent": "Mozilla/5.0" },
   "subtitles": [ { "url": "https://.../en.srt", "lang": "English" } ]
 }
@@ -353,6 +501,26 @@ The aggregate endpoint auto-resolves IMDb when needed, merges all enabled (or `d
 - `quality` – e.g. `Auto`, `1080p`, `720p`, `480p`, `4K`. Missing/unknown qualities parse as `0`.
 - `headers` – optional upstream request headers (stripped when proxying).
 - `subtitles` – optional embedded subtitle tracks (CastleTV, NetMirror, OneTouchTV, Showbox).
+
+### Episode metadata (every provider, same fields)
+
+Every stream — from the anime provider, 4khdhub, CastleTV, anything — carries the same episode metadata, derived from TMDB rather than from whichever site produced the link. That is what makes the same episode read identically no matter where the stream came from.
+
+- `title` – **the episode name**, truncated to 60 characters. It is only set when an episode name is actually known, so a **movie**, or an episode TMDB has not named, keeps the provider's own title. A title is never blanked.
+- `sourceTitle` – the provider's original title, verbatim. Nothing is lost by the replacement above: `4.8 GB | Remux AAC 2 0` and `2.05 GB | Castle` survive here.
+- `episodeName` – the full, untruncated name. `null` for movies.
+- `description` – the **episode** synopsis, not the show's. `null` when TMDB has none; it is never filled in with the show blurb and passed off as the episode's.
+- `still`, `airDate`, `absoluteEpisode` – episode thumbnail, air date, and the flat number anime sites use.
+- `track` / `language` / `languageLabel` – the **audio** track. The anime provider's `sub` maps to `ja`/Japanese and `dub` to `en`/English, because that is the convention for a Japanese-original title. Anything the source does not declare stays `null` rather than being guessed — most providers say nothing, so a correct `null` is more useful than a wrong guess. This is the audio language and is separate from `subtitles` below.
+
+### Tags
+
+Every stream carries a `tag` so a client can group sources without re-deriving what a title is:
+
+- `anime` – anime. Streams from the `anime` provider are **always** tagged `anime` (it resolves links through anime numbering and AniList, whatever TMDB thinks the title is). Every other provider is classified through TMDB: an anime title's streams from ordinary providers are tagged `anime` too, so they group together.
+- `movie` / `tv` – the media type.
+- `tagSource` says who decided: `provider` (the anime provider), `tmdb` (TMDB's genre/language check) or `request` (only the media type could be claimed, because TMDB had not answered). A stream is never tagged on a guess — with no information it stays untagged.
+- `tagCounts` on the response is a quick summary, e.g. `{ "anime": 12, "tv": 4 }`.
 
 Filtering passes through `applyFilters` to enforce min quality + codec exclusions (see below).
 
@@ -395,6 +563,55 @@ The **Server Status** panel shows live metrics, the endpoint list, and a per-pro
 
 - **Run Provider Functional Checks** – hits `/api/streams/:provider/movie/:tmdbId` for each enabled provider and reports pass/fail with stream counts.
 - **Provider check TMDB ID** – the title used for the checks is configurable in the dashboard (default `278` = *The Shawshank Redemption*). The value is persisted to `utils/user-config.json` and exposed via `/api/status` as `providerCheckTmdbId`.
+
+---
+
+## 🧪 Testing
+
+| Command | What it does |
+|---------|--------------|
+| `npm run verify:numbering` | Episode-numbering rules, offline. Add `--live` to check against real TMDB/AniList. |
+| `npm run verify:classify` | URL classification in the test player: all 12 shapes the API can return (offline, no server needed). |
+| `npm run verify:cache` | Bounded cache eviction, offline. |
+| `npm run verify:backoff` | That one TMDB failure produces one upstream retry, not fourteen (TMDB is stubbed; offline). |
+| `npm run verify:concurrency` | That per-request state does not leak between users through globals. |
+| `npm run verify:streammeta` | That episode metadata is uniform across providers, `sourceTitle` survives, and language is never guessed. |
+| `npm run verify:streams` | Hits every enabled provider plus the aggregate for a title, reporting latency, stream counts and container mix. |
+| `npm run verify:player` | Drives `public/test-player.html` in jsdom against a live server, asserting every proxied stream is classified as HLS. |
+| `npm run verify:playerui` | Drives the same page's controls and verdict panel: an anime series, a movie, input rejection, presets. |
+| `npm run verify:coverage` | Sweeps a 26-title catalogue and reports coverage per category, latency percentiles and single-source titles. `--quick` for one title per category. |
+| `npm run verify:load` | **Multi-user load.** Many simultaneous users; asserts no timeouts, no errors, bounded memory, and that the proxy still serves real MPEG-TS afterwards. `--users N --rounds N`. |
+| `npm run verify:lag` | **Jank meter.** Applies continuous load and reports event-loop lag. This is the number that explains "glitchy": while it is high, every timeout and deadline in the process is late by the same amount. `--users N --seconds N`. |
+| `npm run verify:unit` | All six offline checks (no server needed). |
+| `npm run verify` / `verify:all` | Everything / everything including the load test. |
+
+For a one-off title:
+
+```bash
+node scripts/verify-streams.mjs --type series --id 1429 --season 2 --episode 1
+node scripts/verify-load.mjs --users 16 --rounds 3
+node scripts/verify-lag.mjs --users 12 --seconds 60
+node scripts/verify-test-player.mjs            # BASE=http://host:port to point elsewhere
+```
+
+### Diagnosing slowness at runtime
+
+`GET /api/health` reports the state that actually explains a slow or empty response:
+
+| Field | Meaning |
+|-------|---------|
+| `tmdb.cooloffRemainingMs` | > 0 means TMDB rate-limited us and calls are being held back on purpose. |
+| `tmdb.cachedLookups` | TMDB entries cached, against `tmdb.maxEntries`. |
+| `admission` | `active`/`limit` providers running, `pending` waiting. Non-zero `pending` means users are queueing — intended, and the sign that you have more users than the process admits at once. |
+| `eventLoop.p95Ms` | How late timers are firing. **The honest measure of jank**: while this is high, every deadline and timeout in the process is late by the same amount. Idle is ~0ms; hundreds is visible stutter. |
+| `proxy` | Whether the proxy layer is actually mounted. |
+
+Both `verify:streams` and `verify:player` need the server running. For a one-off title:
+
+```bash
+node scripts/verify-streams.mjs --type series --id 1429 --season 2 --episode 1
+node scripts/verify-test-player.mjs            # BASE=http://host:port to point elsewhere
+```
 
 ---
 

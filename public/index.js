@@ -11,13 +11,22 @@ async function fetchProviders(){
 	return r.json();
 }
 
+// GET /api/config masks secrets, so the admin panel cannot read back an existing key or cookie. These two hold
+// the server-side entries, which are shown as "configured on the server" but are kept OUT of the hidden form
+// fields -- submitting the mask ("e0554f…") as the real key would break TMDB for everyone. They are left
+// untouched unless the admin deliberately replaces the whole set, signalled with replaceSecrets.
+	let serverCookies = [];
+	let serverKeys = [];
+
 function setFebboxCookies(cookiesArray){
 	const listEl = document.getElementById('febboxCookieList');
 	const hidden = document.querySelector('input[name="febboxCookiesHidden"]');
 	if(!listEl || !hidden) return;
 	const arr = Array.isArray(cookiesArray)? cookiesArray.filter(c=>c && typeof c==='string') : [];
 	hidden.value = arr.join(',');
-	listEl.innerHTML = arr.length? arr.map((c,i)=>`<div class="cookie-item" data-idx="${i}"><code>${c}</code><button type="button" class="remove" title="Remove" data-action="rm" data-idx="${i}">✕</button></div>`).join('') : '<div class="empty">No cookies added</div>';
+	const server = serverCookies.map((c,i)=>`<div class="cookie-item server" data-idx="${i}"><code>${c}</code><span class="hint">configured on the server</span></div>`).join('');
+	const own = arr.map((c,i)=>`<div class="cookie-item" data-idx="${i}"><code>${c}</code><button type="button" class="remove" title="Remove" data-action="rm" data-idx="${i}">✕</button></div>`).join('');
+	listEl.innerHTML = (server+own) || '<div class="empty">No cookies added</div>';
 }
 function addFebboxCookie(){
 	const input = document.getElementById('febboxCookieInput');
@@ -53,7 +62,9 @@ function setTmdbKeys(keys){
 	if(!listEl || !hidden) return;
 	const arr = Array.isArray(keys)? keys.filter(k=>k && typeof k==='string') : [];
 	hidden.value = arr.join(',');
-	listEl.innerHTML = arr.length? arr.map((k,i)=>`<div class="key-item" data-idx="${i}"><code>${k}</code><button type="button" class="remove" data-action="rm-tmdb" data-idx="${i}" title="Remove">✕</button></div>`).join('') : '<div class="empty">No TMDB keys</div>';
+	const server = serverKeys.map((k,i)=>`<div class="key-item server" data-idx="${i}"><code>${k}</code><span class="hint">configured on the server</span></div>`).join('');
+	const own = arr.map((k,i)=>`<div class="key-item" data-idx="${i}"><code>${k}</code><button type="button" class="remove" data-action="rm-tmdb" data-idx="${i}" title="Remove">✕</button></div>`).join('');
+	listEl.innerHTML = (server+own) || '<div class="empty">No TMDB keys</div>';
 }
 function addTmdbKey(){
 	const input = document.getElementById('tmdbKeyInput');
@@ -101,7 +112,11 @@ function fillForm(data){
 			} else if(trimmed) cookiesVal = [trimmed]; else cookiesVal = [];
 		}
 		if(!Array.isArray(cookiesVal)) cookiesVal = [];
-		setFebboxCookies(cookiesVal);
+		// Split into what the server already holds (masked, read-only) and anything the admin typed here.
+		// Only the typed values are ever submitted -- see the note on serverCookies.
+		const typed = cookiesVal.filter(c => typeof c==='string' && c.indexOf('…')<0 && c!=='•••');
+		serverCookies = cookiesVal.filter(c => typeof c==='string' && (c.indexOf('…')>=0 || c==='•••'));
+		setFebboxCookies(typed);
 	})();
 	(function(){
 		let keys = override.tmdbApiKeys || merged.tmdbApiKeys || [];
@@ -110,7 +125,10 @@ function fillForm(data){
 			else if (merged.tmdbApiKey) keys = [merged.tmdbApiKey];
 			else keys = [];
 		}
-		setTmdbKeys(keys);
+		// As above: masked entries are the server's, typed ones are this form's.
+		const typed = keys.filter(k => typeof k==='string' && k.indexOf('…')<0 && k!=='•••');
+		serverKeys = keys.filter(k => typeof k==='string' && (k.indexOf('…')>=0 || k==='•••'));
+		setTmdbKeys(typed);
 	})();
 	const mqRaw = override.minQualitiesRaw !== undefined ? override.minQualitiesRaw : (merged.minQualitiesRaw || '');
 	const presetValues = ['all','480p','720p','1080p','1440p','2160p'];
@@ -235,8 +253,13 @@ async function save(){
 	if (drSel) payload.defaultRegion = drSel.value ? drSel.value : null;
 	const cookiesHidden = f.elements['febboxCookiesHidden'];
 	if(cookiesHidden){
-		const cookiesVal = cookiesHidden.value.trim();
-		payload.febboxCookies = cookiesVal? cookiesVal.split(',').filter(Boolean) : [];
+		// Only send cookies when the admin has actually typed some in this form. Sending the server's own
+		// masked cookies back would overwrite real ones with the string "e0554f…".
+		const typedCookies = cookiesHidden.value.trim();
+		if(typedCookies){
+			payload.febboxCookies = typedCookies.split(',').filter(Boolean);
+			payload.replaceSecrets = true;
+		}
 	}
 	const boolMap = {
 		adv_enable4khdhub:'enable4khdhubProvider',
@@ -253,8 +276,12 @@ async function save(){
 	const tmdbHidden = f.elements['tmdbApiKeysHidden'];
 	if (tmdbHidden){
 		const raw = tmdbHidden.value.trim();
-		payload.tmdbApiKeys = raw? raw.split(',').filter(Boolean) : [];
-		payload.tmdbApiKey = null;
+		// Same rule as the cookies: an untouched form must not claim to replace the server's TMDB keys.
+		if (raw){
+			payload.tmdbApiKeys = raw.split(',').filter(Boolean);
+			payload.tmdbApiKey = null;
+			payload.replaceSecrets = true;
+		}
 	}
 	try {
 		const r = await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

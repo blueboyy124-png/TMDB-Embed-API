@@ -4,8 +4,11 @@
 const CINEMETA_BASE = 'https://v3-cinemeta.strem.io';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 12000;
+const MAX_CACHE_ENTRIES = 2000;
+const { BoundedTtlCache } = require('./boundedCache');
 
-const episodeCountCache = new Map();
+// Capped. The key is an IMDb id, so this grew once per title ever resolved and never shrank.
+const episodeCountCache = new BoundedTtlCache(MAX_CACHE_ENTRIES);
 
 async function getEpisodesPerSeason(imdbId) {
   const cacheKey = `eps:${imdbId}`;

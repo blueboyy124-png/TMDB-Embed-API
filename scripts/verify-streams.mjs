@@ -26,7 +26,12 @@ const TYPE = argOf('type', 'movie');
 const ID = argOf('id', '550');
 const SEASON = argOf('season', '1');
 const EPISODE = argOf('episode', '1');
-const TIMEOUT = Number(argOf('provider-timeout', '25000'));
+// The client must be willing to wait at least as long as the server promises to take, or this script fails
+// correct behaviour. The server answers a slow provider with PROVIDER_TIMEOUT after 45s
+// (PROVIDER_TIMEOUT_MS), and several providers legitimately run into that -- 4khdhub was measured anywhere
+// from 5s to 161s of its own work. A 25s client abort reported those as "did not respond", which reads like an
+// outage but is not one. Kept above the server's own ceiling so a timeout here means something.
+const TIMEOUT = Number(argOf('provider-timeout', '60000'));
 
 const useEpisodeQuery = TYPE !== 'movie';
 const providerPath = (name) => `/api/streams/${name}/${TYPE}/${ID}`;
@@ -109,9 +114,12 @@ const playable = aggStreams.filter((s) => s.playableInBrowser !== false);
 console.log(`\naggregate ${streamPath}`);
 console.log(`  status=${aggregate.status || aggregate.error} ${aggregate.ms}ms  total=${aggStreams.length}  browser-playable=${playable.length}  partial=${aggregate.body?.partial === true}`);
 if (aggregate.body?.providerStatus) {
+  // providerStatus maps name -> status STRING ('ok' | 'empty' | 'timeout' | 'error' | 'disabled' | 'pending'),
+  // so the value is compared directly. This used to read s.status on that string, which is always
+  // undefined, and so reported every single provider as degraded.
   const slow = Object.entries(aggregate.body.providerStatus)
-    .filter(([, s]) => s.status !== 'ok' && s.status !== 'disabled')
-    .map(([n, s]) => `${n}:${s.status}`);
+    .filter(([, s]) => s !== 'ok' && s !== 'disabled')
+    .map(([n, s]) => `${n}:${s}`);
   if (slow.length) console.log(yellow(`  degraded providers: ${slow.join(' ')}`));
 }
 console.log(`  containers: ${containerSummary(aggStreams)}`);

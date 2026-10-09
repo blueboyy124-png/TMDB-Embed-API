@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4khdhub test player</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<style>
+  :root { --bg:#0f131b; --panel:#1b2130; --line:#2c354a; --text:#e8ecf5; --dim:#8a94ab;
+          --good:#4fd6a0; --bad:#ff7a7a; --warn:#f2b134; --acc:#6fb3ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,sans-serif; }
+  main { max-width:1000px; margin:0 auto; padding:18px 16px 60px; display:grid; gap:12px; }
+  h1 { font-size:1.05rem; margin:0; }
+  h1 small { color:var(--dim); font-weight:400; font-size:.8rem; }
+  .bar, .ctl, .quick, .verdict, .now, .player-wrap { background:var(--panel); padding:10px 12px; border-radius:8px; }
+  .bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .ctl { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; }
+  .ctl label { display:flex; flex-direction:column; gap:3px; font-size:.68rem; color:var(--dim); text-transform:uppercase; letter-spacing:.05em; }
+  .ctl input, .ctl select { background:#131926; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; font-size:.85rem; min-width:88px; }
+  .ctl input[type=number] { width:96px; }
+  button { background:var(--warn); color:#1a1300; border:0; border-radius:6px; padding:8px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); font-weight:400; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.sm { padding:4px 10px; font-size:.78rem; font-weight:400; }
+  .quick { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .quick .grp { color:var(--dim); font-size:.68rem; text-transform:uppercase; letter-spacing:.05em; }
+  .quick button { background:transparent; color:var(--text); border:1px solid var(--line); font-weight:400; font-size:.78rem; padding:4px 10px; border-radius:99px; }
+  video { width:100%; background:#000; border-radius:8px; max-height:52vh; }
+  .prow { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  .prow select { background:#131926; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; font-size:.8rem; }
+  .qbadge { font-size:.72rem; color:var(--dim); }
+  .qbadge b { color:var(--text); }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border-radius:8px; font-size:.82rem; }
+  td, th { padding:6px 10px; text-align:left; border-bottom:1px solid var(--line); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  th { color:var(--dim); font-weight:500; }
+  tr.cur td { background:rgba(242,177,52,.08); }
+  tr.mkv td { opacity:.55; }
+  .kind { display:inline-block; padding:1px 7px; border-radius:99px; font-size:.7rem; text-transform:uppercase; letter-spacing:.04em; }
+  .kind.hls { background:rgba(79,214,160,.16); color:var(--good); }
+  .kind.file { background:rgba(111,179,255,.16); color:var(--acc); }
+  .kind.mkv { background:rgba(255,122,122,.16); color:var(--bad); }
+  .kind.unknown { background:rgba(242,177,52,.16); color:var(--warn); }
+  .lang { display:inline-block; padding:1px 7px; border-radius:99px; font-size:.7rem; background:rgba(79,214,160,.16); color:var(--good); }
+  .lang.none { background:rgba(138,148,171,.14); color:var(--dim); }
+  .tag { display:inline-block; padding:1px 7px; border-radius:99px; font-size:.7rem; background:rgba(111,179,255,.16); color:var(--acc); }
+  .src { color:var(--dim); font-size:.74rem; }
+  .now .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .verdict { display:flex; gap:14px; flex-wrap:wrap; align-items:center; }
+  .verdict .big { font-size:1.6rem; font-weight:700; font-variant-numeric:tabular-nums; line-height:1; }
+  .verdict .big small { font-size:.7rem; font-weight:400; color:var(--dim); display:block; margin-top:3px; }
+  .verdict .who { flex:1 1 220px; min-width:0; }
+  .verdict .who h2 { margin:0 0 2px; font-size:1rem; }
+  .stats { display:flex; gap:12px; flex-wrap:wrap; font-size:.74rem; color:var(--dim); }
+  .stats b { color:var(--text); }
+  pre { margin:0; background:var(--panel); padding:12px; border-radius:8px; max-height:220px; overflow:auto; font-size:.78rem; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar">
+    <h1>4khdhub test <small>— provider-direct, TMDB in / streams out</small></h1>
+    <label class="src">API <input id="apibase" size="24" style="background:#131926;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit;"></label>
+    <button id="go">Fetch 4khdhub</button>
+    <span class="src" id="endpoint"></span>
+  </div>
+
+  <form class="ctl" id="ctl" autocomplete="off">
+    <label>Type
+      <select id="type">
+        <option value="series">TV show</option>
+        <option value="series-anime">Anime (series)</option>
+        <option value="movie">Movie</option>
+      </select>
+    </label>
+    <label>TMDB ID
+      <input id="tmdbid" type="number" min="1" step="1" value="37854" inputmode="numeric">
+    </label>
+    <label id="seWrap">Season
+      <input id="season" type="number" min="0" step="1" value="21" inputmode="numeric">
+    </label>
+    <label id="epWrap">Episode
+      <input id="episode" type="number" min="1" step="1" value="1" inputmode="numeric">
+    </label>
+    <label>Min quality
+      <select id="minq">
+        <option value="0">All</option>
+        <option value="720">720p+</option>
+        <option value="1080" selected>1080p+</option>
+        <option value="2160">4K only</option>
+      </select>
+    </label>
+  </form>
+
+  <div class="quick" id="quick">
+    <span class="grp">Anime</span>
+    <button type="button" data-p="37854:21:1">One Piece S21E1</button>
+    <button type="button" data-p="1429:4:1">AoT S4E1</button>
+    <span class="grp">TV</span>
+    <button type="button" data-p="1396:1:1">Breaking Bad S1E1</button>
+    <button type="button" data-p="1399:1:1">GoT S1E1</button>
+    <span class="grp">Movies</span>
+    <button type="button" data-m="155">Dark Knight</button>
+    <button type="button" data-m="545611">EEAAO</button>
+  </div>
+
+  <div class="verdict" id="verdict">
+    <div class="big" id="vms">—<small>FETCH TIME</small></div>
+    <div class="who">
+      <h2 id="vtitle">Nothing fetched yet</h2>
+      <div class="stats" id="vstats"></div>
+      <div class="src" id="vwhy"></div>
+    </div>
+  </div>
+
+  <div class="player-wrap">
+    <video id="v" controls playsinline preload="none"></video>
+    <div class="prow">
+      <span class="qbadge" id="qnow">No stream selected</span>
+      <label class="src">Speed
+        <select id="speed">
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="1.5">1.5x</option>
+          <option value="2">2x</option>
+        </select>
+      </label>
+      <button class="ghost sm" id="prev" type="button">◀ Prev ep</button>
+      <button class="ghost sm" id="next" type="button">Next ep ▶</button>
+      <button class="ghost sm" id="pip" type="button">PiP</button>
+    </div>
+  </div>
+  <div class="now" id="now">Nothing playing yet.</div>
+
+  <div><h1 style="font-size:1rem">Streams <span class="src" id="streamcount"></span></h1>
+    <div class="prow"><button class="ghost sm" id="checkall" type="button">Check all rows</button>
+    <span class="src">probes each link before you play it, so dead ones say why instead of spinning forever</span></div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>Play</th><th>Server / file</th><th>Type</th><th class="num">Quality</th><th>Language</th><th>Tag</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div class="bar"><h1 style="font-size:.95rem">Log</h1><button class="ghost sm" id="clearlog" type="button">Clear</button></div>
+  <pre id="log"></pre>
+</main>
+<script>
+'use strict';
+// 4khdhub-only test page. Calls the provider-direct route so the aggregate's
+// other providers can neither slow it down nor pollute the results:
+//   GET /api/streams/4khdhub/movie/:id
+//   GET /api/streams/4khdhub/series/:id?season=&episode=
+const $ = s => document.querySelector(s);
+const v = $('#v');
+const PROVIDER = '4khdhub';
+// API base is configurable because a "<!DOCTYPE..."-instead-of-JSON response means
+// this page is talking to the wrong origin (e.g. a dev server whose fallback serves
+// index.html for unknown /api/* paths). Defaults to whatever served this page.
+$('#apibase').value = localStorage.getItem('hk_api') || location.origin;
+$('#apibase').onchange = () => localStorage.setItem('hk_api', $('#apibase').value.trim());
+const apiBase = () => ($('#apibase').value.trim() || location.origin).replace(/\/$/, '');
+
+const q = {
+  get kind() { return $('#type').value; },
+  get type() { return $('#type').value === 'movie' ? 'movie' : 'series'; },
+  get id() { return $('#tmdbid').value.trim(); },
+  get season() { return $('#season').value.trim(); },
+  get episode() { return $('#episode').value.trim(); },
+  get minq() { return Number($('#minq').value) || 0; }
+};
+
+const log = m => { const el = $('#log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+$('#clearlog').onclick = () => { $('#log').textContent = ''; };
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+// Same HLS trap as player.html/test-player.html: with enableProxy on, URLs look like
+// <origin>/m3u8-proxy?url=... ("m3u8-proxy" has no dot), so /\.m3u8/ alone misclassifies.
+function isHlsUrl(u) {
+  if (typeof u !== 'string') return false;
+  return /\.m3u8(\?|#|$)/i.test(u) || /\/m3u8-proxy(\?|$)/i.test(u);
+}
+function unwrap(u) {
+  const m = /[?&]url=([^&]+)/.exec(u);
+  if (m && /\/m3u8-proxy|\/ts-proxy/.test(u)) { try { return decodeURIComponent(m[1]); } catch { /* keep raw */ } }
+  return u;
+}
+function classify(stream) {
+  const raw = String(stream.url || '');
+  const u = unwrap(raw);
+  if (/\.m3u8(\?|#|$)/i.test(u) || /\/m3u8-proxy(\?|$)/i.test(raw)) return { kind: 'hls', label: 'HLS' };
+  if (/\.mkv(\?|#|$)/i.test(u)) return { kind: 'mkv', label: 'MKV' };
+  if (/\.(mp4|webm|m4v|mov)(\?|#|$)/i.test(u)) return { kind: 'file', label: 'file' };
+  if (/\/ts-proxy(\?|$)/i.test(raw)) return { kind: 'file', label: 'file' };
+  if (/\/m3u8-proxy(\?|$)/i.test(raw)) return { kind: 'hls', label: 'HLS' };
+  return { kind: 'unknown', label: '?' };
+}
+// "2160p" / 2160 / "4K" -> 2160, so 4K sorts first and the min-quality filter works.
+function qnum(s) {
+  const m = String(s.quality ?? '').match(/(\d{3,4})/);
+  if (m) return Number(m[1]);
+  if (/4k/i.test(String(s.quality ?? '') + ' ' + (s.title || '') + ' ' + (s.name || ''))) return 2160;
+  return 0;
+}
+function qlabel(s) { const n = qnum(s); return n ? n + 'p' : (s.quality || '—'); }
+
+function syncForm() {
+  const isMovie = q.type === 'movie';
+  $('#seWrap').style.display = isMovie ? 'none' : '';
+  $('#epWrap').style.display = isMovie ? 'none' : '';
+  $('#prev').disabled = $('#next').disabled = isMovie;
+}
+function buildPath() {
+  const id = q.id;
+  if (!/^\d+$/.test(id)) return { error: 'TMDB ID must be a positive whole number' };
+  if (q.type === 'movie') return { path: `/api/streams/${PROVIDER}/movie/${id}` };
+  if (!/^\d+$/.test(q.season) || !/^\d+$/.test(q.episode)) return { error: 'Season and episode must both be whole numbers' };
+  return { path: `/api/streams/${PROVIDER}/series/${id}?season=${q.season}&episode=${q.episode}` };
+}
+
+// --- link probe: verify a row is actually playable BEFORE handing it to <video> ---
+// Two lies this catches, both seen on Backrooms (2026):
+//  1. "HLS" rows whose playlist segments are HTML pages (hbplay.pages.dev wrapper
+//     hiding an r2.dev link the provider meant to ban) — hls.js can never play these.
+//  2. "file" rows that are really MKV (ts-proxy URLs carry no extension, so the
+//     classifier cannot tell until it reads the Content-Type).
+async function probe(stream) {
+  const { kind } = classify(stream);
+  try {
+    if (kind === 'hls') {
+      const res = await fetch(stream.url, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
+      const txt = await res.text();
+      if (!/^\s*#EXTM3U/.test(txt))
+        return { ok: false, reason: `not a playlist — server returned: "${txt.replace(/\s+/g, ' ').slice(0, 120)}"` };
+      const segs = [...txt.matchAll(/^(?!#)(\S+)\s*$/gm)].map(m => m[1]).slice(0, 3);
+      if (segs.some(u => /%3C!doctype|%3Chtml|pages\.dev|ampproject/i.test(u)))
+        return { ok: false, reason: 'playlist segments point at web pages, not video (dead link)' };
+      if (!segs.length && !/#EXT-X-STREAM-INF/.test(txt))
+        return { ok: false, reason: 'playlist has no playable segments' };
+      return { ok: true };
+    }
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), 15000);
+    let res;
+    try {
+      // Headers arrive before the body: read Content-Type, then drop the connection
+      // immediately. Required because ts-proxy ignores Range and streams 70GB+ otherwise.
+      res = await fetch(stream.url, { headers: { Range: 'bytes=0-1023' }, signal: ctl.signal });
+    } finally { clearTimeout(to); }
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    try { if (res.body) await res.body.cancel(); } catch { /* already closed */ }
+    ctl.abort();
+    if (/matroska|video\/mkv|x-mkv/.test(ct)) return { ok: false, kind: 'mkv', reason: 'MKV container — no browser can play it' };
+    if (/html|json|text\/plain/.test(ct) && !/mpegurl/.test(ct)) return { ok: false, reason: `server returned ${ct || 'unknown type'}, not video` };
+    if (!res.ok) return { ok: false, reason: `server refused (HTTP ${res.status})` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: /abort/i.test(e && e.name || '') ? 'probe timed out (host too slow)' : `probe failed: ${(e && e.message) || e}` };
+  }
+}
+const note = (i, text) => {
+  const el = document.querySelector(`div[data-probe="${i}"]`);
+  if (el) el.textContent = text;
+};
+// Turn a row that probed as MKV into an honest disabled row.
+function demoteRow(i) {
+  const tr = document.querySelector(`#rows tr[data-i="${i}"]`);
+  if (!tr) return;
+  tr.classList.add('mkv');
+  const k = tr.querySelector('.kind'); if (k) { k.className = 'kind mkv'; k.textContent = 'MKV'; }
+  const b = tr.querySelector('button[data-i]'); if (b) { b.disabled = true; b.removeAttribute('data-i'); b.textContent = 'n/a'; b.title = 'Probed: MKV, no browser can decode it'; }
+}
+let shownStreams = [];
+async function checkAll() {
+  const btn = $('#checkall');
+  btn.disabled = true;
+  let good = 0;
+  for (let i = 0; i < shownStreams.length; i++) {
+    if (classify(shownStreams[i]).kind === 'mkv') { note(i, '✘ MKV by extension'); continue; }
+    note(i, 'checking…');
+    const p = await probe(shownStreams[i]);
+    if (p.ok) { good++; note(i, '✔ looks playable'); }
+    else { note(i, '✘ ' + p.reason); if (p.kind === 'mkv') demoteRow(i); }
+  }
+  log(`probe done: ${good}/${shownStreams.length} rows look playable`);
+  btn.disabled = false;
+}
+
+// --- playback (listeners attached once) ---
+let hls = null, current = null, startClock = 0, startTimer = null;
+function stopHls() { if (hls) { try { hls.destroy(); } catch { /* gone */ } hls = null; } }
+v.addEventListener('loadeddata', () => {
+  if (!current) return;
+  clearTimeout(startTimer);
+  $('#qnow').innerHTML = `Playing <b>${esc(qlabel(current))}</b> · ${esc(current.name || PROVIDER)}`;
+  log(`OK   ${current.name || PROVIDER} ${classify(current).label} first frame in ${Math.round(performance.now() - startClock)}ms`);
+});
+v.addEventListener('error', () => {
+  if (!current) return;
+  clearTimeout(startTimer);
+  const e = v.error;
+  const what = { 1: 'loading aborted', 2: 'network error', 3: 'decode error', 4: 'source not supported' }[e ? e.code : 0] || 'unknown error';
+  log(`FAIL ${current.name || PROVIDER} — ${what}${e && e.message ? ' (' + e.message + ')' : ''}`);
+});
+$('#speed').onchange = () => { v.playbackRate = Number($('#speed').value) || 1; };
+$('#pip').onclick = async () => {
+  try {
+    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else await v.requestPictureInPicture();
+  } catch (e) { log('PiP failed: ' + e.message); }
+};
+
+async function play(stream, idx) {
+  const { kind, label } = classify(stream);
+  document.querySelectorAll('#rows tr').forEach(tr => tr.classList.toggle('cur', tr.dataset.i === String(idx)));
+  if (kind === 'mkv') { log(`SKIP ${stream.name}: MKV cannot play in any browser — pick an HLS/file row.`); return; }
+  note(idx, 'checking…');
+  $('#qnow').innerHTML = `Checking <b>${esc(qlabel(stream))}</b> · ${esc(stream.name || PROVIDER)}…`;
+  const p = await probe(stream);
+  if (!p.ok) {
+    note(idx, '✘ ' + p.reason);
+    if (p.kind === 'mkv') demoteRow(idx);
+    $('#qnow').textContent = 'Check failed — see table row';
+    log(`SKIP ${stream.name || PROVIDER}: ${p.reason}`);
+    return;
+  }
+  note(idx, '✔ plays');
+  current = stream;
+  startClock = performance.now();
+  clearTimeout(startTimer);
+  $('#now').innerHTML = `<div class="t">${esc(stream.title || stream.name || stream.url)}</div>` +
+    `<div class="src">${esc(stream.name || PROVIDER)} · ${esc(label)} · ${esc(qlabel(stream))}</div>`;
+  $('#qnow').innerHTML = `Loading <b>${esc(qlabel(stream))}</b> · ${esc(stream.name || PROVIDER)}…`;
+  stopHls(); v.pause(); v.removeAttribute('src'); v.load();
+  try { v.currentTime = 0; } catch { /* no media yet */ }
+  startTimer = setTimeout(() => log(`FAIL ${stream.name || PROVIDER}: no first frame within 20s — source stalled or dead`), 20000);
+  const kick = () => v.play().catch(() => log('autoplay blocked — press play on the video'));
+  if (kind === 'hls') {
+    if (window.Hls && Hls.isSupported()) {
+      hls = new Hls({ startFragPrefetch: true, maxBufferLength: 12 });
+      hls.on(Hls.Events.ERROR, (_e, d) => {
+        if (!d.fatal) return;
+        clearTimeout(startTimer);
+        log(`FAIL ${stream.name || PROVIDER} hls — ${d.details}`);
+      });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => { log(`manifest parsed, requesting ${label} ${qlabel(stream)}`); kick(); });
+      hls.loadSource(stream.url); hls.attachMedia(v);
+      log(`load ${stream.name || PROVIDER} HLS ${qlabel(stream)} via hls.js`);
+    } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+      v.src = stream.url; log(`load ${stream.name || PROVIDER} HLS via native HLS`); kick();
+    } else { clearTimeout(startTimer); log('FAIL no HLS support in this browser'); }
+  } else {
+    v.src = stream.url; log(`load ${stream.name || PROVIDER} ${label} ${qlabel(stream)} via <video src>`); kick();
+  }
+  v.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+// --- fetch (4khdhub only) ---
+let token = 0;
+async function run() {
+  const t = ++token, t0 = performance.now();
+  const built = buildPath();
+  if (built.error) { $('#vwhy').textContent = built.error; log('refused locally: ' + built.error); return; }
+  $('#endpoint').textContent = 'GET ' + built.path;
+  $('#vms').innerHTML = '…<small>LOADING</small>';
+  $('#vtitle').textContent = q.type === 'movie' ? `Movie TMDB ${q.id}` : `TMDB ${q.id} S${q.season}E${q.episode}`;
+  const url = apiBase() + built.path;
+  log(`GET ${url}`);
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    const text = await res.text();
+    let body;
+    try { body = JSON.parse(text); }
+    catch {
+      // The classic cause: this page is served from an origin whose server answers
+      // /api/* with an HTML fallback page. Show what actually came back.
+      $('#vms').innerHTML = `${Math.round(performance.now() - t0)}<small>ms (WRONG SERVER)</small>`;
+      $('#vwhy').textContent = `Expected JSON from ${url} but got ${res.status} ${res.headers.get('content-type') || ''}: "${text.replace(/\s+/g, ' ').slice(0, 160)}". Fix the API base above to point at the TMDB-Embed-API server.`;
+      log(`FAILED: non-JSON response (HTTP ${res.status}) — wrong API base? Set it to the server host, e.g. http://localhost:8787`);
+      return;
+    }
+    if (t !== token) return;
+    if (!res.ok || body.success === false) {
+      $('#vms').innerHTML = `${Math.round(performance.now() - t0)}<small>ms (FAILED)</small>`;
+      $('#vwhy').textContent = body.error || ('HTTP ' + res.status);
+      log(`FAILED: HTTP ${res.status} ${body.error || ''} ${body.message || ''}`);
+      return;
+    }
+    if (body.error === 'PROVIDER_TIMEOUT') {
+      $('#vms').innerHTML = `${Math.round(performance.now() - t0)}<small>ms (TIMEOUT)</small>`;
+      $('#vwhy').textContent = '4khdhub timed out on the server (45s cap): ' + (body.message || '');
+      log('TIMEOUT: 4khdhub exceeded the server provider cap — retry, it caches validation verdicts for 1h');
+      return;
+    }
+    let streams = body.streams || [];
+    const elapsed = performance.now() - t0;
+    const counts = { hls: 0, file: 0, mkv: 0, unknown: 0 };
+    streams.forEach(s => { counts[classify(s).kind]++; });
+    // Highest quality first so 4K is on top; min-quality filter applies after.
+    streams = streams.slice().sort((a, b) => qnum(b) - qnum(a));
+    const shown = streams.filter(s => qnum(s) >= q.minq);
+    $('#vms').innerHTML = `${Math.round(elapsed)}<small>ms TOTAL</small>`;
+    const ep = body.episode || {};
+    $('#vtitle').textContent = (ep.name && q.type !== 'movie' ? ep.name + ' — ' : '') +
+      (q.type === 'movie' ? `Movie TMDB ${q.id}` : `TMDB ${q.id} S${q.season}E${q.episode}`) +
+      (q.kind === 'series-anime' ? ' (anime)' : '');
+    const pt = body.providerTimings ? body.providerTimings[PROVIDER] : null;
+    $('#vstats').innerHTML =
+      `<span><b>${streams.length}</b> streams</span><span>·</span>` +
+      `<span>4khdhub <b>${pt != null ? pt + 'ms' : '—'}</b></span><span>·</span>` +
+      `<span>${counts.hls} HLS / ${counts.file} file / ${counts.mkv} MKV</span>`;
+    $('#vwhy').textContent = (ep.overview || '') +
+      (body.tagCounts ? `  tags: ${JSON.stringify(body.tagCounts)}` : '');
+    $('#streamcount').textContent = `— ${shown.length} of ${streams.length} shown (min ${q.minq ? q.minq + 'p' : 'all'})`;
+    log(`${streams.length} 4khdhub streams in ${Math.round(elapsed)}ms (provider ${pt != null ? pt + 'ms' : 'n/a'}) — ${counts.hls} HLS, ${counts.file} file, ${counts.mkv} MKV, ${counts.unknown} unknown`);
+    if (!shown.length) { $('#rows').innerHTML = '<tr><td colspan="6" class="src">No streams at/above the selected min quality.</td></tr>'; return; }
+    $('#rows').innerHTML = shown.map((s, i) => {
+      const { kind, label } = classify(s);
+      const btn = kind === 'mkv'
+        ? '<button disabled title="No browser can decode MKV">n/a</button>'
+        : `<button class="sm" data-i="${i}">Play</button>`;
+      const lang = s.languageLabel || s.language
+        ? `<span class="lang">${esc(s.languageLabel || s.language)}</span>`
+        : '<span class="lang none">—</span>';
+      return `<tr data-i="${i}" class="${kind === 'mkv' ? 'mkv' : ''}">
+        <td>${btn}</td>
+        <td>${esc(s.name || PROVIDER)}<div class="src">${esc(String(s.title || s.url).split('\n')[0].slice(0, 120))}</div><div class="src" data-probe="${i}"></div></td>
+        <td><span class="kind ${kind}">${esc(label)}</span></td>
+        <td class="num">${esc(qlabel(s))}</td>
+        <td>${lang}</td>
+        <td>${s.tag ? `<span class="tag">${esc(s.tag)}</span>` : '—'}</td></tr>`;
+    }).join('');
+    shownStreams = shown;
+    $('#rows').querySelectorAll('button[data-i]').forEach(b => b.onclick = () => play(shown[Number(b.dataset.i)], b.dataset.i));
+  } catch (e) { log('FAILED to fetch: ' + e.message); }
+}
+
+$('#go').onclick = run;
+$('#checkall').onclick = checkAll;
+$('#ctl').addEventListener('submit', e => { e.preventDefault(); run(); });
+['#type', '#tmdbid', '#season', '#episode', '#minq'].forEach(s => {
+  $(s).addEventListener('input', syncForm);
+  $(s).addEventListener('change', syncForm);
+});
+document.querySelectorAll('#quick button').forEach(b => b.onclick = () => {
+  if (b.dataset.m) { $('#type').value = 'movie'; $('#tmdbid').value = b.dataset.m; }
+  else { const [id, se, ep] = b.dataset.p.split(':'); $('#type').value = 'series'; $('#tmdbid').value = id; $('#season').value = se; $('#episode').value = ep; }
+  syncForm(); run();
+});
+$('#prev').onclick = () => { if (q.type !== 'movie') { $('#episode').value = Math.max(1, Number(q.episode) - 1 || 1); run(); } };
+$('#next').onclick = () => { if (q.type !== 'movie') { $('#episode').value = (Number(q.episode) || 1) + 1; run(); } };
+
+syncForm();
+if (!window.Hls) log('hls.js did not load (offline?) — HLS plays only in Safari');
+</script>
+</body>
+</html>

@@ -23,7 +23,9 @@ let langIndex = 0;
 function nextUA() { return UA_POOL[uaIndex++ % UA_POOL.length]; }
 function nextLang() { return ACCEPT_LANG_POOL[langIndex++ % ACCEPT_LANG_POOL.length]; }
 
-const streamCache = new Map();
+// Capped: keyed per title, and this provider is called for every catalogue page a user browses.
+const { BoundedTtlCache } = require('../utils/boundedCache');
+const streamCache = new BoundedTtlCache(1000);
 const inflight = new Map();
 let resolvedApiUrl = '';
 

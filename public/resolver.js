@@ -142,9 +142,18 @@ class Resolver {
     return Resolver._hevc;
   }
   static mkv() { if (Resolver._mkv == null) { try { Resolver._mkv = !!document.createElement('video').canPlayType('video/x-matroska'); } catch { Resolver._mkv = false; } } return Resolver._mkv; }
-  static isMkv(s) { return !/\.m3u8/i.test(s.url) && /\.mkv|\bmkv\b|matroska/i.test(`${s.name || ''} ${s.title || ''} ${s.url}`); }
+  // ★ INTEGRATION NOTE A (copy of the same helper in player.html — keep the two in sync) ★
+  // An HLS playlist, INCLUDING our own proxy endpoint "/m3u8-proxy?url=...".
+  // A bare /\.m3u8/ test is WRONG here: "m3u8-proxy" has no dot before "m3u8", so every proxied
+  // stream would be misjudged as a plain file — ranked low (playable() 1) and never treated as HLS.
+  // player.html defines the same helper for its own use; both must stay identical.
+  static isHlsUrl(u) {
+    if (typeof u !== 'string') return false;
+    return /\.m3u8(\?|#|$)/i.test(u) || /\/m3u8-proxy(\?|$)/i.test(u);
+  }
+  static isMkv(s) { return !Resolver.isHlsUrl(s.url) && /\.mkv|\bmkv\b|matroska/i.test(`${s.name || ''} ${s.title || ''} ${s.url}`); }
   static playable(s) {   // 2 = should play here, 1 = one likely problem, 0 = two (still tried, but last)
-    if (/\.m3u8/i.test(s.url)) return 2;
+    if (Resolver.isHlsUrl(s.url)) return 2;
     const hevc = /x265|hevc|h[ .]?265/i.test(`${s.name || ''} ${s.title || ''} ${s.url}`);
     return (Resolver.isMkv(s) && !Resolver.mkv() ? 0 : 1) + (hevc && !Resolver.hevc() ? 0 : 1);
   }

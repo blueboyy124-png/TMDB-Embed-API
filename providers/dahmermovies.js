@@ -126,7 +126,7 @@ async function getDahmermoviesStreams(tmdbId, mediaType = 'movie', seasonNum = n
 
         const info = fileName
             .replace(/\.(mkv|mp4|avi|webm|m3u8)$/i, '')
-            .replace(/[\[\]()._-]/g, ' ')
+            .replace(/[[\x5d()._-]/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
 

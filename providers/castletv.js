@@ -1,5 +1,6 @@
 const { createDecipheriv } = require('crypto');
 const { getDetails } = require('../utils/tmdb');
+const { normaliseLanguage } = require('../utils/streamMeta');
 
 const CASTLE_BASE = 'https://api.hlowb.com';
 const PKG = 'com.external.castle';
@@ -214,11 +215,16 @@ function formatSize(bytes) {
     return `${(bytes / 1000000).toFixed(0)} MB`;
 }
 
-function buildCastleStreams(raw, langLabel, titleLine, resolution) {
+// `langLabel` is the display string the track produced ("[English]", "[Hindi]"). The language itself was
+// available all along on the track object but was only ever flattened into a label, so castletv reported no
+// language while the anime provider did. `langRaw` carries the unformatted name for the structured field.
+function buildCastleStreams(raw, langLabel, titleLine, resolution, langRaw) {
     const data = unwrap(raw);
     if (!data.videoUrl && !((data.videos || []).length)) return [];
 
     const defaultQual = resolutionLabel(resolution);
+    const lang = normaliseLanguage(langRaw);
+    const languageFields = lang.language ? { language: lang.language, languageLabel: lang.languageLabel } : {};
 
     const subtitles = (data.subtitles || [])
         .filter((s) => typeof s.url === 'string' && s.url.length > 0)
@@ -254,6 +260,7 @@ function buildCastleStreams(raw, langLabel, titleLine, resolution) {
                     quality: qual,
                     provider: 'CastleTV',
                     headers: PLAYBACK_HEADERS,
+                    ...languageFields,
                     ...(subtitles.length ? { subtitles } : {})
                 }
             });
@@ -273,6 +280,7 @@ function buildCastleStreams(raw, langLabel, titleLine, resolution) {
             quality: qual,
             provider: 'CastleTV',
             headers: PLAYBACK_HEADERS,
+            ...languageFields,
             ...(subtitles.length ? { subtitles } : {})
         });
     }
@@ -377,7 +385,7 @@ async function getCastletvStreams(tmdbId, mediaType = 'movie', seasonNum = null,
                     if (r.status !== 'fulfilled') continue;
                     const { raw, resolution, track } = r.value;
                     const langLabel = `[${track.languageName || track.abbreviate || 'Unknown'}]`;
-                    for (const s of buildCastleStreams(raw, langLabel, titleLine, resolution)) {
+                    for (const s of buildCastleStreams(raw, langLabel, titleLine, resolution, track.languageName || track.abbreviate)) {
                         if (!seenUrls.has(s.url)) {
                             seenUrls.add(s.url);
                             streams.push(s);

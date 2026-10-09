@@ -1,0 +1,7 @@
+module CMPV [system] {
+    // Homebrew installs mpv's headers here rather than under /usr/include, so the path is explicit instead of
+    // relying on a system include dir. Falls through to the standard path on Intel/other prefixes.
+    header "shim.h"
+    link "mpv"
+    export *
+}
