@@ -322,14 +322,53 @@ app.get('/api/providers/:name', (req,res) => {
 app.get('/api/streams/:type/:tmdbId', async (req,res) => {
   const { type, tmdbId } = req.params;
   if (!['movie','series'].includes(type)) return res.status(400).json({ success:false, error:'INVALID_TYPE' });
+
   const season = req.query.season ? Number(req.query.season) : null;
   const episode = req.query.episode ? Number(req.query.episode) : null;
+
+  // Deep diagnostics to debug missing title/overview for movies
+  if (process.env.TMDB_DEBUG_WATCH === '1') {
+    console.log('[tmdb-debug] /api/streams hit', {
+      type,
+      tmdbId,
+      season: req.query.season,
+      episode: req.query.episode,
+      query: req.query,
+      apiKeyPresent: !!process.env.TMDB_API_KEY,
+      tmdbApiKeysPresent: !!(config && Array.isArray(config.tmdbApiKeys) && config.tmdbApiKeys.length),
+    });
+  }
+
   try {
     metrics.streamRequests++;
+
     const tmdbType = type === 'movie' ? 'movie' : 'tv';
     const imdbId = await resolveImdbId(tmdbType, tmdbId); if (imdbId) metrics.tmdbToImdbLookups++;
+
+    // For movies only: also fetch TMDB details so frontend can show title/overview/poster/release_date.
+    let details = null;
+    if (type === 'movie') {
+      try {
+        const { getDetails } = require('./utils/tmdb');
+        details = await getDetails('movie', tmdbId);
+        if (process.env.TMDB_DEBUG_WATCH === '1') {
+          console.log('[tmdb-debug] movie details fetched', {
+            hasTitle: !!details?.title,
+            hasOverview: !!details?.overview,
+            hasPosterPath: !!details?.poster_path,
+            hasReleaseDate: !!details?.release_date,
+          });
+        }
+      } catch (e) {
+        if (process.env.TMDB_DEBUG_WATCH === '1') {
+          console.error('[tmdb-debug] failed to fetch movie details', e?.message || e);
+        }
+      }
+    }
+
     const selectedProviders = (config.defaultProviders.length ? config.defaultProviders : listProviders().map(p=>p.name));
     const providerTimings = {};
+
     const results = await Promise.all(selectedProviders.map(async name => {
       const prov = getProvider(name);
       if (!prov || !prov.enabled) return [];
@@ -347,16 +386,45 @@ app.get('/api/streams/:type/:tmdbId', async (req,res) => {
         return [];
       }
     }));
+
     let streams = results.flat();
     streams = applyFilters(streams, 'aggregate', config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
+
     if (config.enableProxy) {
       const serverUrl = `${req.protocol}://${req.get('host')}`;
       streams = processStreamsForProxy(streams, serverUrl);
       // Omit original headers when proxying to avoid leaking upstream requirements
       streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
     }
-    res.json({ success:true, tmdbId, imdbId, count: streams.length, providerTimings, streams });
+
+    const payload = {
+      success:true,
+      tmdbId,
+      imdbId,
+      count: streams.length,
+      providerTimings,
+      streams,
+      // TMDB metadata for movies (used by frontend)
+      ...(type === 'movie' ? {
+        title: details?.title,
+        overview: details?.overview,
+        release_date: details?.release_date,
+        poster_path: details?.poster_path,
+      } : {}),
+    };
+
+    if (process.env.TMDB_DEBUG_WATCH === '1') {
+      console.log('[tmdb-debug] movie payload metadata presence', {
+        titlePresent: !!payload?.title,
+        overviewPresent: !!payload?.overview,
+        posterPathPresent: !!payload?.poster_path,
+        releaseDatePresent: !!payload?.release_date,
+        streamCount: payload.count,
+      });
+    }
+
+    res.json(payload);
   } catch (e) {
     metrics.lastError = e.message;
     res.status(500).json({ success:false, error:'INTERNAL_ERROR', message:e.message });
@@ -398,8 +466,8 @@ const PORT = config.port;
 const HOST = process.env.BIND_HOST || '0.0.0.0';
 const server = app.listen(PORT, HOST, () => {
   console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT}`);
-  if (HOST !== 'localhost') {
-    console.log(`Local access (if running on your machine): http://localhost:${PORT}`);
+  if (HOST !== '192.168.86.75') {
+    console.log(`Local access (if running on your machine): http://192.168.86.75:${PORT}`);
   }
   console.log('Endpoints:');
   console.log('  GET  /api/health');

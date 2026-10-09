@@ -1,27 +1,30 @@
 {
-  "defaultProviders": [],
+  "providerCheckTmdbId": "278",
   "configVersion": 1,
+  "port": 8787,
+  "minQualitiesRaw": "all",
+  "minQualities": "720p",
+  "excludeCodecsRaw": "{\"excludeDV\":false,\"excludeHDR\":false}",
+  "febboxCookies": [
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3ODQ0ODY2MzUsIm5iZiI6MTc4NDQ4NjYzNSwiZXhwIjoxODE1NTkwNjU1LCJkYXRhIjp7InVpZCI6MjE5NDUyNCwidG9rZW4iOiI5OTFmYzU5NmExODlhNjQyODI5MjZhZTA2ZGVkMWZkOCJ9fQ.Xvrf5_dUSbbXyRGPC9wE_7A82NRJo5omJ7X2H267r8s"
+  ],
+  "enableProxy": true,
+  "disableCache": false,
+  "disableUrlValidation": false,
+  "disable4khdhubUrlValidation": false,
+  "enablePStreamApi": true,
+  "defaultProviders": [],
+  "defaultRegion": "HK1",
   "tmdbApiKeys": [
     "e0554f6521da4365d4a36ea7ff17ae51"
   ],
   "enableShowboxProvider": true,
-  "febboxCookies": [
-    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpYXQiOjE3ODQ0ODY2MzUsIm5iZiI6MTc4NDQ4NjYzNSwiZXhwIjoxODE1NTkwNjU1LCJkYXRhIjp7InVpZCI6MjE5NDUyNCwidG9rZW4iOiI5OTFmYzU5NmExODlhNjQyODI5MjZhZTA2ZGVkMWZkOCJ9fQ.Xvrf5_dUSbbXyRGPC9wE_7A82NRJo5omJ7X2H267r8s"
-  ],
   "enable4khdhubProvider": true,
   "enableVixsrcProvider": true,
-  "enableProxy": true,
-  "disableCache": false,
-  "enablePStreamApi": true,
-  "disableUrlValidation": false,
-  "disable4khdhubUrlValidation": false,
-  "excludeCodecsRaw": "{\"excludeDV\":false,\"excludeHDR\":false}",
-  "minQualitiesRaw": "all",
-  "enableUhdmoviesProvider": false,
   "enableVidlinkProvider": true,
   "enableVideasyProvider": true,
-  "enableLordflixProvider": false,
-  "enableNotorrentProvider": false,
   "enableDahmermoviesProvider": true,
-  "port": 8787
+  "enableUhdmoviesProvider": false,
+  "enableLordflixProvider": false,
+  "enableNotorrentProvider": false
 }

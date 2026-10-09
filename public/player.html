@@ -229,6 +229,20 @@ async function linkCheck(u) {
     finally { ac.abort(); }
   }
 }
+// ★ INTEGRATION NOTE A — READ THIS BEFORE COPYING THIS FILE ★
+// Is this URL an HLS playlist?
+// This must ALSO match the API's own proxy endpoint "/m3u8-proxy?url=...".
+// The old check here was /\.m3u8/i, which FAILS on "m3u8-proxy" because there is no dot
+// before "m3u8". With the proxy switched on, every stream URL looked like
+// "http://localhost:8787/m3u8-proxy?url=...", so this returned false, hls.js was never
+// loaded, and the browser got an HLS playlist on a bare <video src> — which Chrome cannot
+// decode. The visible symptom was a player with controls, a 0:00 duration and no error.
+// If you write your own player, use this function and never a bare /\.m3u8/ test.
+function isHlsUrl(u) {
+  if (typeof u !== 'string') return false;
+  return /\.m3u8(\?|#|$)/i.test(u)      // normal playlist:  https://host/path/master.m3u8?x
+      || /\/m3u8-proxy(\?|$)/i.test(u); // via our proxy:   http://host/m3u8-proxy?url=...
+}
 // Loads the stream in a hidden <video>; several can be probed at once. Resolves {el,h,kill} when data arrives.
 function probe(st, signal, ms = 9000) {
   return new Promise(res => {
@@ -240,7 +254,7 @@ function probe(st, signal, ms = 9000) {
     const onAbort = () => done(false), to = setTimeout(() => done(false, `no data in ${ms / 1000}s`), ms);
     if (signal.aborted) return done(false);
     signal.addEventListener('abort', onAbort);
-    if (/\.m3u8/i.test(st.url) && window.Hls && Hls.isSupported()) {
+    if (isHlsUrl(st.url) && window.Hls && Hls.isSupported()) {
       h = new Hls({ maxBufferLength: 12, startFragPrefetch: true });
       h.on(Hls.Events.FRAG_LOADED, () => done(true));
       h.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) done(false, 'hls ' + d.details); });
@@ -427,7 +441,7 @@ async function diagnose() {
         const sr = document.createElement('tr'), td = document.createElement('td'), wrap = document.createElement('div'); td.colSpan = 6; wrap.className = 'sr';
         const pb = document.createElement('button'), badge = document.createElement('span'), txt = document.createElement('span');
         pb.textContent = '\u25B6 Play'; badge.className = 'badge'; txt.className = 't';
-        const kind = /\.m3u8/i.test(s.url) ? 'HLS' : Resolver.isMkv(s) ? 'MKV' : 'file';
+        const kind = isHlsUrl(s.url) ? 'HLS' : Resolver.isMkv(s) ? 'MKV' : 'file';
         txt.textContent = `${s.quality || '?'} | ${kind} | ${String(s.title || s.name || s.url).split('\n')[0].slice(0, 120)}`; txt.title = s.url;
         pb.onclick = () => {
           badge.className = 'badge'; badge.textContent = 'loading...';
@@ -503,7 +517,7 @@ async function netCheck(u, isHls) {
   return r;
 }
 function precheck(st) {   // things wrong before even trying
-  const notes = [], hlsUrl = /\.m3u8/i.test(st.url); let U;
+  const notes = [], hlsUrl = isHlsUrl(st.url); let U;
   try { U = new URL(st.url, R.base); } catch { return { fatal: 'The stream URL is not valid: ' + st.url, notes }; }
   const txt = `${st.name || ''} ${st.title || ''} ${st.url}`;
   if (hlsUrl && !(window.Hls && Hls.isSupported()) && !document.createElement('video').canPlayType('application/vnd.apple.mpegurl')) return { fatal: 'This is an HLS (.m3u8) stream, but hls.js did not load (no access to cdnjs.cloudflare.com?) and this browser has no built-in HLS support.', notes };
@@ -526,8 +540,12 @@ function loadTry(a, ms) {
     el.onloadeddata = () => done(true);
     el.onerror = () => { const er = el.error; done(false, (MEDIA_WHY[er ? er.code : 0] || 'unknown media error') + (er && er.message ? ` (browser message: ${String(er.message).slice(0, 160)})` : ''), 'media' + (er ? er.code : '')); };
     const href = new URL(a.url, R.base).href;
-    if (/\.m3u8/i.test(href) && window.Hls && Hls.isSupported()) {
-      h = new Hls({ maxBufferLength: 12 }); hls = h;
+    // ★ INTEGRATION NOTE B — this is the actual playback attach point. It must use isHlsUrl(),
+    // not /\.m3u8/, or proxied streams reach the video element raw and never play. See NOTE A.
+    if (isHlsUrl(href) && window.Hls && Hls.isSupported()) {
+      // startFragPrefetch matches the probe path above (NOTE A). Without it hls.js finishes level selection
+      // before fetching the first fragment, which measurably delays first frame on every stream.
+      h = new Hls({ maxBufferLength: 12, startFragPrefetch: true }); hls = h;
       h.on(Hls.Events.ERROR, (e, d) => {
         const code = d.response && d.response.code, txt = `${HLS_WHY[d.details] || d.details}${code ? ` (HTTP ${code})` : ''}`;
         if (d.fatal) done(false, txt, 'hls:' + d.details); else soft.push(txt);
@@ -539,7 +557,7 @@ function loadTry(a, ms) {
 }
 async function explainFail(tried, pre, st, head) {
   say(head + ' Checking why...', [], 'busy');
-  const facts = tried.map(t => `${t.label}: ${t.why}`), why = [...(pre.notes || [])], hlsUrl = /\.m3u8/i.test(st.url);
+  const facts = tried.map(t => `${t.label}: ${t.why}`), why = [...(pre.notes || [])], hlsUrl = isHlsUrl(st.url);
   if (pre.fatal) why.unshift(pre.fatal);
   const seen = new Set(), nets = [];
   for (const t of tried) {
@@ -672,6 +690,97 @@ setInterval(() => { if (playKey && v && !v.paused && v.currentTime > 5) posSet(p
 if (!window.Hls) log('hls.js did not load (offline?), HLS streams will only play in Safari');
 ['#id', '#season', '#episode', '#type'].forEach(s => { $(s).addEventListener('input', warmSoon); $(s).addEventListener('change', warmSoon); });
 warmSoon();
+
+/* ════════════════════════════════════════════════════════════════════════════════════════════════
+   ★ PLAYBACK INTEGRATION NOTES — everything a new player needs to get this working ★
+   ════════════════════════════════════════════════════════════════════════════════════════════════
+
+   These are the parts that were NOT obvious and cost the most time. Copy them when you build the
+   final player. Each one is marked in the code above with the matching letter.
+
+   ── A. DETECT HLS CORRECTLY (the bug that broke playback) ───────────────────────────────────────
+      Almost every provider returns an HLS (.m3u8) playlist. Almost every player starts with a
+      test like this:
+
+          if (url.includes('.m3u8')) { ... }   // wrong: bare file, hls.js never loaded
+
+      That test is WRONG once the API proxy is enabled. With `enableProxy: true` in
+      utils/user-config.json the API rewrites every stream URL to:
+
+          http://<api-host>/m3u8-proxy?url=<encoded original>
+
+      "m3u8-proxy" has NO DOT before "m3u8", so /\.m3u8/ does not match. The player concludes
+      "this is a plain file", hands it to <video src>, hls.js is never loaded, and Chrome
+      cannot decode HLS natively. Symptom: a player with controls, duration 0:00, no error,
+      and Network showing 200 responses that look fine.
+
+      Use this instead (defined as isHlsUrl() in this file and as Resolver.isHlsUrl() in
+      resolver.js — keep the two identical):
+
+          function isHlsUrl(u) {
+            if (typeof u !== 'string') return false;
+            return /\.m3u8(\?|#|$)/i.test(u) || /\/m3u8-proxy(\?|$)/i.test(u);
+          }
+
+      The same trap exists in two other places that are easy to forget:
+        - ranking streams  → a proxied HLS was scored as "probably won't play" and sorted last
+        - .mkv detection    → a proxied HLS was treated as a plain file and flagged as Matroska
+      Both are fixed in this file; make sure your player does the same.
+
+   ── B. LOAD hls.js AND CHECK SUPPORT ────────────────────────────────────────────────────────────
+          <script src="https://cdn.jsdelivr.net/npm/hls.js@1"><\/script>
+          (note the escaped closing tag above. HTML parsing ends an inline script block at the
+           first real closing tag it sees, even inside a JS comment, so pasting a raw one here
+           silently turns everything after it into markup and the file stops parsing.
+           Never paste a raw closing tag into this file.)
+
+          if (window.Hls && Hls.isSupported()) {
+            const hls = new Hls({ maxBufferLength: 30 });
+            hls.loadSource(url);
+            hls.attachMedia(videoEl);      // order matters: attachMedia BEFORE/AFTER loadSource is fine,
+          }                                 // but attachMedia must happen before play() resolves
+      Hls.isSupported() is false on Safari/iOS — that is expected, not an error.
+
+   ── C. NATIVE HLS FALLBACK (Safari / iOS) ───────────────────────────────────────────────────────
+      Safari plays HLS without hls.js:
+          if (videoEl.canPlayType('application/vnd.apple.mpegurl')) videoEl.src = url;
+      Prefer native over hls.js on Apple devices: it is smoother and uses less battery.
+
+   ── D. AUTOPLAY USUALLY REQUIRES MUTE ───────────────────────────────────────────────────────────
+      Browsers block unmuted autoplay without a user gesture. See loadTry(): it calls play(),
+      and on rejection sets muted = true and retries. Without this the player looks broken.
+
+   ── E. DO NOT STRIP THE headers FIELD ───────────────────────────────────────────────────────────
+      Some providers (AniXo, VidSrc) require a Referer or their CDN returns 403. The API returns
+      that per stream as `headers`. When the proxy is enabled the API forwards them server-side
+      (processStreamsForProxy appends them to the proxy URL as a base64 `headers=` param), so the
+      client does NOT need to send them. If you disable the proxy you MUST apply stream.headers
+      yourself — a browser cannot set Referer on a media request.
+
+   ── F. ANIXO TICKETS ARE SINGLE USE (provider/anime.js) ────────────────────────────────────────
+      The anime provider calls anixo.buzz in three steps: load the embed page for a short-lived
+      ticket, then POST it to /api/stream/resolve to get the real stream URL. That ticket is
+      consumed by the FIRST request that uses it — a second request with the same ticket gets 403.
+      So: one fresh page load (and therefore one ticket) per resolve call. Reusing one ticket
+      across several servers silently limits you to whichever server ran first.
+
+   ── G. ENABLE THE PROXY, AND RESTART AFTER CONFIG EDITS ────────────────────────────────────────
+      utils/user-config.json → "enableProxy": true
+      Proxy routes are mounted ONCE at server startup. Editing the file does nothing until the
+      server restarts. `npm start` watches only restart.trigger, so run:
+
+          touch restart.trigger
+
+      Verify it took effect:  GET /m3u8-proxy  →  400 ("URL parameter required") means mounted.
+      A 404 / "Cannot GET /m3u8-proxy" means the routes were never mounted.
+
+   ── H. WHY THE PROXY IS WORTH IT ────────────────────────────────────────────────────────────────
+      Several hosts are behind Cloudflare and will not serve a browser directly (you get the
+      "Sorry, you have been blocked" page). The proxy fetches server-side and forwards the
+      Referer the host requires, which the browser cannot do. It also rewrites the playlist so
+      every segment is fetched through the same origin, avoiding CORS problems entirely.
+
+   ════════════════════════════════════════════════════════════════════════════════════════════════ */
 </script>
 </body>
 </html>

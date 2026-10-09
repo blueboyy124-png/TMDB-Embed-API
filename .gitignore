@@ -2,4 +2,8 @@
 restart.trigger
 .vscode/
 .env
+.DS_Store
+providers/.cache/
+.build/
+utils/*.corrupt-*
 /tmp_context
