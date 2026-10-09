@@ -95,9 +95,10 @@ check('short text untouched', truncate('short') === 'short');
 check('long text ellipsised', truncate('x'.repeat(200)).endsWith('…') && truncate('x'.repeat(200)).length === TITLE_MAX);
 check('truncate handles null', truncate(null) === '');
 
-// 9. Language from a provider that reports one by name rather than by track -- this is the vixsrc and castletv
-//    path, and both previously threw the information away (vixsrc parsed it and returned nothing; castletv
-//    flattened it into a display label and never emitted a field).
+// 9. Language from a provider that reports one by name rather than by track -- the HLS-rendition path, which
+//    previously threw the information away (vixsrc parsed it and returned nothing; castletv flattened it
+//    into a display label and never emitted a field). vixsrc has since been removed as a provider, but the
+//    path survives in utils/hlsPlaylist.js and in castletv.
 check('ISO 639-2 "eng" -> en/English', normaliseLanguage('eng').language === 'en' && normaliseLanguage('eng').languageLabel === 'English');
 check('"English" -> en/English', normaliseLanguage('English').language === 'en');
 check('"jpn" -> ja/Japanese', normaliseLanguage('jpn').language === 'ja' && normaliseLanguage('jpn').languageLabel === 'Japanese');
@@ -116,11 +117,12 @@ check('no usable tracks report nothing', pickPrimaryLanguage([]).language === nu
 check('undefined input is safe', pickPrimaryLanguage(undefined).language === null);
 
 console.log('');
-console.log('--- vixsrc manifest parsing (upstream-independent) ---');
-// vixsrc.to is not currently serving these titles, so the language path is verified against a real
-// EXT-X-MEDIA manifest here rather than through the network. parsePlaylist used to build `audioTracks` and
-// then return only { sources, subtitles } -- the language was parsed and thrown away.
-const { parsePlaylist } = require('../providers/vixsrc.js');
+console.log('--- HLS manifest parsing (upstream-independent) ---');
+// The language path is verified against a real EXT-X-MEDIA manifest here rather than through the network.
+// parsePlaylist (now in utils/hlsPlaylist.js; it lived in providers/vixsrc.js before that provider was
+// removed) used to build `audioTracks` and then return only { sources, subtitles } -- the language was
+// parsed and thrown away.
+const { parsePlaylist } = require('../utils/hlsPlaylist');
 const MANIFEST = [
   '#EXTM3U',
   '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud1",NAME="Japanese",LANGUAGE="jpn",DEFAULT=YES,URI="audio/jpn.m3u8"',
@@ -129,7 +131,7 @@ const MANIFEST = [
   '#EXT-X-STREAM-INF:BANDWIDTH=2074179,RESOLUTION=1920x1080,CODECS="avc1.640032"',
   'https://cdn.example/video/1080/index.m3u8'
 ].join('\n');
-const parsed = parsePlaylist(MANIFEST, 'https://cdn.example/video/master.m3u8', 'https://vixsrc.to/embed/x');
+const parsed = parsePlaylist(MANIFEST, 'https://cdn.example/video/master.m3u8', 'https://embed.example/x');
 check('audioTracks are actually returned now', Array.isArray(parsed.audioTracks) && parsed.audioTracks.length === 2,
   `${(parsed.audioTracks || []).length} tracks`);
 check('Japanese track parsed', parsed.audioTracks.some(t => t.language === 'jpn'), JSON.stringify(parsed.audioTracks));

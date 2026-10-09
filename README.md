@@ -248,19 +248,21 @@ The API supports a plugin system. Drop a new provider file in the `providers/` f
 ### Current Built-in Providers
 - `showbox` - Showbox/FebBox streams (requires FebBox JWT cookie)
 - `4khdhub` - 4KHDHub streams
-- `vixsrc` - VixSrc streams
-- `videasy` - Videasy streams (10 servers via enc-dec.app)
 - `vidlink` - Vidlink streams
 - `dahmermovies` - DahmerMovies streams (direct file links)
 - `streamflix` - StreamFlix streams (direct MP4 links)
 - `vaplayer` - VaPlayer streams (HLS via IMDb ID)
 - `castletv` - CastleTV streams (AES-128 encrypted API)
-- `hdghartv` - HDGharTV streams (title-matched search + IMDb verification)
 - `netmirror` - NetMirror streams (Netflix direct + NewTV platform fallback)
 - `onetouchtv` - OneTouchTV streams (AES-256 encrypted API)
-- `zxcstreams` - ZXCStreams streams (multi-server backend, dynamic domain discovery)
+- `anime` - Anime streams (anime title lookup)
 
-Providers that rely on title resolution against TMDB (`castletv`, `hdghartv`, `onetouchtv`, `zxcstreams`, `vaplayer`, `netmirror`) require at least one TMDB API key configured.
+Providers that rely on title resolution against TMDB (`castletv`, `onetouchtv`, `vaplayer`, `netmirror`) require at least one TMDB API key configured.
+
+> Four providers (`vixsrc`, `videasy`, `hdghartv`, `zxcstreams`) were removed after the 2026-10 audit: each
+> had been returning zero streams across every probe title because the upstream sites moved behind
+> Cloudflare challenges or died. `parsePlaylist` (HLS manifest parsing) survived the removal and now lives
+> in `utils/hlsPlaylist.js`.
 
 ### Adding a New Provider
 1. **Create** `providers/yourprovider.js` with your stream fetching logic
@@ -271,17 +273,14 @@ Providers that rely on title resolution against TMDB (`castletv`, `hdghartv`, `o
    const providerFunctionMap = {
      'Showbox.js': 'getStreamsFromTmdbId',
      '4khdhub.js': 'get4KHDHubStreams',
-     'vixsrc.js': 'getVixsrcStreams',
-     'videasy.js': 'getVideasyStreams',
      'vidlink.js': 'getVidlinkStreams',
      'dahmermovies.js': 'getDahmermoviesStreams',
      'streamflix.js': 'getStreamflixStreams',
      'vaplayer.js': 'getVaplayerStreams',
      'castletv.js': 'getCastletvStreams',
-     'hdghartv.js': 'getHdghartvStreams',
      'netmirror.js': 'getNetmirrorStreams',
      'onetouchtv.js': 'getOnetouchtvStreams',
-     'zxcstreams.js': 'getZxcstreamsStreams',
+     'anime.js': 'getAnimeStreams',
      'yourprovider.js': 'getYourproviderStreams'
    };
    ```
@@ -366,7 +365,7 @@ The aggregate is not held hostage by its slowest provider. It answers after `AGG
   "count": 28,
   "partial": true,
   "pending": ["4khdhub", "anime"],
-  "providerStatus": { "vixsrc": "ok", "4khdhub": "pending" },
+  "providerStatus": { "showbox": "ok", "4khdhub": "pending" },
   "timings": { "totalMs": 8157, "providersMs": 8153, "deadlineMs": 8000, "settled": 11, "providerCount": 14 }
 }
 ```

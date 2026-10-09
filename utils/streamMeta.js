@@ -114,8 +114,8 @@ function enrichStreams(streams, details, opts = {}) {
   });
 }
 
-// Language names as they appear in HLS manifests, mapped to what this API reports. vixsrc (and many other
-// packagers) advertise EXT-X-MEDIA audio renditions with LANGUAGE="eng" / NAME="English", which was being
+// Language names as they appear in HLS manifests, mapped to what this API reports. HLS packagers
+// advertise EXT-X-MEDIA audio renditions with LANGUAGE="eng" / NAME="English", which was being
 // parsed and then dropped on the floor: parsePlaylist built `audioTracks` and returned only
 // `{ sources, subtitles }`.
 //
