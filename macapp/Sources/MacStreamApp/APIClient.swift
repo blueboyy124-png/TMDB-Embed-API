@@ -52,19 +52,12 @@ struct Stream: Identifiable, Decodable, Hashable {
     let language: String?
     let tag: String?
     let container: String?
-    let playableInBrowser: Bool?
     /// When this stream arrived, in ms from the start of the live feed. Assigned locally as rows land.
     var arrivalMs: Int = 0
     // Not in the API response; assigned locally so SwiftUI can tell rows apart.
     var id: String { "\(provider ?? "?")|\(url)" }
 
     var displayTitle: String { title ?? name ?? provider ?? "stream" }
-    // AVPlayer handles these; everything else goes to mpv.
-    var nativePlayable: Bool {
-        guard playableInBrowser != false else { return false }
-        let c = (container ?? "").lowercased()
-        return c == "m3u8" || c == "mp4" || c == "m4v" || c == "mov" || c == "webm"
-    }
 }
 
 struct StreamsResponse: Decodable {
@@ -294,11 +287,10 @@ final class LiveStreamFeed: NSObject, URLSessionDataDelegate {
                     quality: raw["quality"] as? String, provider: raw["provider"] as? String ?? provider,
                     sourceTitle: raw["sourceTitle"] as? String,
                     languageLabel: raw["languageLabel"] as? String, language: raw["language"] as? String,
-                    tag: raw["tag"] as? String, container: raw["container"] as? String,
-                    playableInBrowser: raw["playableInBrowser"] as? Bool
+                    tag: raw["tag"] as? String, container: raw["container"] as? String
                 )
-                // Raw provider output carries no container, and MKV is the one thing here that cannot play
-                // -- so derive it now rather than waiting for the final enriched payload.
+                // Raw provider output carries no container; derive it from the URL now so
+                // the UI can label rows (MKV, mp4, ...) while they are still streaming in.
                 arrived.append(base.derived().withArrival(arrival))
             }
         case "done":
@@ -317,7 +309,7 @@ final class LiveStreamFeed: NSObject, URLSessionDataDelegate {
 extension Stream {
     enum CodingKeys: String, CodingKey {
         case title, name, url, quality, provider, sourceTitle
-        case languageLabel, language, tag, container, playableInBrowser, arrivalMs
+        case languageLabel, language, tag, container, arrivalMs
     }
 
     /// arrivalMs is stamped locally when a row lands — the API never sends it, so its
@@ -335,7 +327,6 @@ extension Stream {
         language = try c.decodeIfPresent(String.self, forKey: .language)
         tag = try c.decodeIfPresent(String.self, forKey: .tag)
         container = try c.decodeIfPresent(String.self, forKey: .container)
-        playableInBrowser = try c.decodeIfPresent(Bool.self, forKey: .playableInBrowser)
         arrivalMs = try c.decodeIfPresent(Int.self, forKey: .arrivalMs) ?? 0
     }
 
@@ -354,7 +345,7 @@ extension Stream {
         return Stream(
             title: title, name: name, url: url, quality: quality, provider: provider,
             sourceTitle: sourceTitle, languageLabel: languageLabel, language: language,
-            tag: tag, container: ext.isEmpty ? nil : ext, playableInBrowser: playableInBrowser
+            tag: tag, container: ext.isEmpty ? nil : ext
         )
     }
 
@@ -363,7 +354,7 @@ extension Stream {
         Stream(
             title: title, name: name, url: url, quality: quality, provider: provider,
             sourceTitle: sourceTitle, languageLabel: languageLabel, language: language,
-            tag: tag, container: container, playableInBrowser: playableInBrowser, arrivalMs: ms
+            tag: tag, container: container, arrivalMs: ms
         )
     }
 }

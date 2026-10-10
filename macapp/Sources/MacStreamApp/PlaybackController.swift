@@ -28,6 +28,19 @@ final class PlaybackController: ObservableObject {
         var canSwitch: Bool
     }
 
+    /// How playback is presented. `watching` is the full-window player; `mini` is the floating
+    /// card while browsing; `idle` is no playback at all. The mpv view lives in ONE persistent
+    /// spot in the hierarchy and only its frame changes between modes, so switching
+    /// watching <-> mini never re-creates the player (that would tear mpv down mid-playback).
+    enum PlayerMode: Equatable {
+        case idle, watching, mini
+    }
+
+    @Published var mode: PlayerMode = .idle
+    /// True while mpv is waiting on the network (cache-idle while meant to be playing) —
+    /// the buffering spinner. A paused player is core-idle too, hence `isPlaying`.
+    @Published var buffering = false
+
     @Published var current: Stream?
     @Published var context: Context?
     /// Every row of the last load — the row selector's list. Switching rows is a loadfile on
@@ -45,6 +58,8 @@ final class PlaybackController: ObservableObject {
 
     @Published var stallOffer: StallOffer?
     @Published var showKeysHelp = false
+    /// The streams drawer in the player: manual row picking, opt-in (auto-play is the default).
+    @Published var showStreams = false
 
     /// Consumed by MPVView the moment the URL changes: mpv's `start=` per-file option puts the
     /// first frame at this position instead of flashing 0:00 and then jumping. It is rewritten
@@ -92,6 +107,7 @@ final class PlaybackController: ObservableObject {
         isPlaying = true
         lastStart = (stream, rows, context, resume)
         MPVController.log("play selected: \(stream.displayTitle.prefix(60))\(resume > 1 ? " @\(Int(resume))s" : "")")
+        mode = .watching
         current = stream
         // Self-test clock: every playback cycle gets its own STOP_AFTER window.
         testDeadline = ProcessInfo.processInfo.environment["STOP_AFTER"].flatMap { secs in
@@ -121,6 +137,8 @@ final class PlaybackController: ObservableObject {
     private func finishStop() {
         player = nil
         current = nil
+        mode = .idle
+        buffering = false
         context = nil
         rows = []
         rowIndex = nil
@@ -130,6 +148,20 @@ final class PlaybackController: ObservableObject {
         stallOffer = nil
         lastPos = -1
         lastStart = nil
+    }
+
+    /// Back out of the full player WITHOUT stopping: the video shrinks to the mini-player card
+    /// and keeps playing while you browse. mpv is untouched — only the presentation changes.
+    func dismissToMini() {
+        guard mode == .watching, current != nil else { return }
+        mode = .mini
+    }
+
+    /// The mini-player's close button (and Esc from the mini state): stop for real.
+    /// Position is saved by the stop path.
+    func closeMini() {
+        guard mode == .mini else { return }
+        stop()
     }
 
     // MARK: transport
@@ -255,10 +287,11 @@ final class PlaybackController: ObservableObject {
         }
         guard player != nil, !scrubbing else { return }
         // Async: reading mpv properties touches the same internal lock that once wedged main.
-        player?.readPosition { [weak self] t, d in
+        player?.readPosition { [weak self] t, d, coreIdle in
             guard let self else { return }
             pos = t.isFinite ? t : 0
             if d > 0 { dur = d }
+            buffering = coreIdle && isPlaying
             if pos > 0.5 && !didFirstFrame {
                 didFirstFrame = true
                 MPVController.log("first frame at pos=\(pos)")
@@ -270,13 +303,15 @@ final class PlaybackController: ObservableObject {
                 lastMove = Date()
                 stallOffer = nil          // recovered on its own
                 stallDismissed = false
-            } else if didFirstFrame && isPlaying && Date().timeIntervalSince(lastMove) > 15 {
+            } else if isPlaying && Date().timeIntervalSince(lastMove) > 15 {
                 // End of file is not a stall: pos parked at the duration means the video
                 // FINISHED, and offering "switch to the next row" there would be nonsense.
+                // No first frame yet is a stall TOO: a dead row (expired embed token, garbage
+                // playlist) would otherwise spin the loading state forever with no way out.
                 let atEnd = dur > 0 && pos >= dur - 0.5
                 if stallOffer == nil && !stallDismissed && !atEnd {
                     stallOffer = StallOffer(canSwitch: rows.count > 1)
-                    MPVController.log("STALL detected at pos=\(pos) (rows=\(rows.count))")
+                    MPVController.log("STALL detected at pos=\(pos) firstFrame=\(didFirstFrame) (rows=\(rows.count))")
                 }
             }
             // Continue Watching: on stop via flushProgress(), plus every 10s while playing —

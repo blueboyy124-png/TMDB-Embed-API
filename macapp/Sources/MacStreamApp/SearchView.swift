@@ -36,6 +36,7 @@ struct SearchView: View {
 
             content
         }
+        .background(Color.black)
         .onAppear { focused = true }
     }
 

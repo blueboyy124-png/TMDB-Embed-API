@@ -1,25 +1,23 @@
 import SwiftUI
 import AppKit
 
-// The app shell: sidebar (Discover / Search / Settings), the player pane pinned above the
-// content while something plays, and the navigation stack for title details. The player
-// stays mounted across section changes — browsing does not interrupt watching, and there
-// is no separate window anywhere.
+// The app shell. Browsing (sidebar + navigation stack) fills the window; the player surface
+// sits on top of it at the ROOT of the window content and covers everything while watching.
+//
+// The surface is mounted in ONE structural position for its whole life and only its frame
+// changes between full-window and mini-player, so switching modes never re-creates the
+// NSViewRepresentable (which would tear mpv down mid-playback). Root placement is also
+// load-bearing for attachment: a representable nested inside NavigationSplitView's detail
+// column never receives a window.
 struct ContentView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var pb: PlaybackController
     @State private var keyMonitor: Any?
 
     var body: some View {
-        VStack(spacing: 0) {
-            // The player lives at the ROOT of the window content, above the split view: an
-            // NSViewRepresentable nested inside NavigationSplitView's detail column is created
-            // by SwiftUI but never committed to the window's view tree (window == nil forever),
-            // while at the root it attaches on the first pass.
-            if pb.current != nil {
-                PlayerPane()
-                Divider()
-            }
+        ZStack(alignment: .bottomTrailing) {
+            Color.black.ignoresSafeArea()
+
             NavigationSplitView {
                 sidebar
                     .navigationSplitViewColumnWidth(min: 170, ideal: 195)
@@ -31,9 +29,20 @@ struct ContentView: View {
                         }
                 }
             }
+            .opacity(pb.mode == .watching ? 0 : 1)
+            .allowsHitTesting(pb.mode != .watching)
+
+            if pb.mode != .idle {
+                PlayerSurface()
+                    .transition(.opacity)
+            }
         }
+        .preferredColorScheme(.dark)
+        .tint(.white)
+        .background(WindowConfigurator())
         .onAppear {
             installKeys()
+            MPVController.log("ContentView onAppear (monitor \(keyMonitor == nil ? "MISSING" : "ok"))")
             app.autoTestIfRequested()
         }
         .onDisappear { removeKeys() }
@@ -59,6 +68,8 @@ struct ContentView: View {
                 .tag(AppModel.Section.settings)
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(Color.black)
     }
 
     // MARK: content root
@@ -79,7 +90,7 @@ struct ContentView: View {
     ///  - when a text field, slider, table or button has focus, ALL keys pass through —
     ///    typing "m" in the server field must type "m", arrow keys belong to the focused
     ///    list, Space belongs to the focused button.
-    ///  - otherwise the player keys apply (clicking the video puts it in this state)
+    ///  - otherwise the player keys apply
     private func installKeys() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak app, weak pb] event in
@@ -94,10 +105,15 @@ struct ContentView: View {
     }
 
     private func handle(_ e: NSEvent, app: AppModel, pb: PlaybackController) -> NSEvent? {
+        MPVController.log("key: code=\(e.keyCode) chars=\(e.charactersIgnoringModifiers ?? "?") mode=\(pb.mode)")
         if e.modifierFlags.contains(.command) { return e }
-        if pb.current == nil { return e }
+        if pb.mode == .idle { return e }
 
-        if let fr = NSApp.keyWindow?.firstResponder,
+        // While WATCHING, the browsing UI below is hidden (opacity 0, hit-testing off) — its
+        // focused responder must not swallow player keys. While MINI, browsing is live: keys
+        // that belong to a focused field/list/button pass through.
+        if pb.mode == .mini,
+           let fr = NSApp.keyWindow?.firstResponder,
            fr is NSTextView || fr is NSSlider || fr is NSTableView
             || fr is NSButton || fr is NSCollectionView || fr is NSPopUpButton {
             return e
@@ -121,10 +137,11 @@ struct ContentView: View {
             return nil
         case 53:                                    // Escape
             if pb.stallOffer != nil { pb.dismissStallOffer(); return nil }
-            // In fullscreen, Escape belongs to the system (exit fullscreen).
-            if NSApp.windows.contains(where: { $0.styleMask.contains(.fullScreen) }) { return e }
-            pb.stop()
-            return nil
+            // Watching -> shrink to the mini-player (video keeps playing).
+            // Mini-player -> stop for real (position saved to Continue Watching).
+            if pb.mode == .watching { pb.dismissToMini(); return nil }
+            if pb.mode == .mini { pb.closeMini(); return nil }
+            return e
         case 36:                                    // Return
             if pb.stallOffer != nil { pb.acceptStallOffer(); return nil }
             return e
@@ -139,11 +156,11 @@ struct ContentView: View {
         case "]":
             Task { _ = await app.advanceEpisode(1) }
             return nil
-        case "f":
-            if let w = NSApp.windows.first(where: { $0.isVisible }) { w.toggleFullScreen(nil) }
-            return nil
         case "m":
             pb.toggleMute()
+            return nil
+        case "s":
+            pb.showStreams.toggle()
             return nil
         case "?":
             pb.showKeysHelp.toggle()
@@ -157,5 +174,24 @@ struct ContentView: View {
         default:
             return e
         }
+    }
+}
+
+/// Puts the window itself into the theme: true-black background, transparent titlebar so the
+/// hero art can run under it, hidden title (the sidebar carries navigation identity).
+private struct WindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { Self.apply(v.window) }
+        return v
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { Self.apply(nsView.window) }
+    }
+    private static func apply(_ w: NSWindow?) {
+        guard let w, w.backgroundColor != .black else { return }
+        w.backgroundColor = .black
+        w.titlebarAppearsTransparent = true
+        w.titleVisibility = .hidden
     }
 }

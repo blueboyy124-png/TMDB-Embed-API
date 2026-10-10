@@ -82,11 +82,15 @@ struct SettingsView: View {
 
             Section("About") {
                 Text("MacStream — 4khdhub-first streaming client for the local TMDB-Embed-API. "
-                     + "Keyboard: click the video, then Space / arrows / 1-9 / [ ] / f / m.")
+                     + "Keyboard: Space / arrows / 1-9 / s / [ ] / m — press ? in the player for the list.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+        // Grouped forms ship their own gray cards; over the true-black window we drop them so
+        // Settings reads as plain text sections on black (Disney-style, no macOS translucency).
+        .scrollContentBackground(.hidden)
+        .background(Color.black)
         .frame(maxWidth: 620)
         .navigationTitle("Settings")
     }

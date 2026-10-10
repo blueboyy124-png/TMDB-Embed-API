@@ -71,6 +71,7 @@ struct DiscoverView: View {
             }
             .padding(16)
         }
+        .background(Color.black)
         .onAppear { app.loadTrendingIfNeeded() }
     }
 

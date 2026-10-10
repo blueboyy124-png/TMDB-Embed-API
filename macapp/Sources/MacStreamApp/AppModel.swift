@@ -192,11 +192,44 @@ final class AppModel: ObservableObject {
     }
 
     /// Continue Watching: open the title (or reuse the open one), select the saved episode,
-    /// and play the first row at the saved position.
+    /// and play the first row at the saved position. The player screen is entered immediately —
+    /// the spinner covers the fetch, exactly like pressing Play.
     func resume(_ item: ContinueItem) {
         pendingResume = item
         pendingWant = nil
+        playback.mode = .watching
         push(TitleRef(id: item.tmdbId, type: item.type))
+    }
+
+    /// The detail page's Play button: switch to the player screen NOW (loading state while
+    /// streams resolve) and either replay the rows already in hand or kick a load with
+    /// auto-play. `resume` is the saved position when the title is partially watched.
+    func playFromDetail(resume: Double = 0) {
+        playback.mode = .watching
+        if let first = streams.first {
+            play(first, resume: resume)
+        } else if !isLoadingStreams {
+            playSelected(resume: resume)
+        } else {
+            // A fetch is already running (the detail opened seconds ago) — stage the
+            // auto-play on it instead of restarting the fetch from scratch.
+            pendingAutoPlay = resume
+        }
+    }
+
+    /// The saved Continue Watching item for a title as currently selected (series: this
+    /// episode), so the detail page can label its button Play vs Resume.
+    func continueItemForCurrentSelection() -> ContinueItem? {
+        guard let ref = detailRef else { return nil }
+        let key: String
+        if ref.type == "series" {
+            let s = selectedEpisode?.season ?? selectedSeason
+            let e = selectedEpisode?.number ?? selectedEpisode?.episode ?? 1
+            key = "series:\(ref.id):s\(s)e\(e)"
+        } else {
+            key = "movie:\(ref.id)"
+        }
+        return store.items.first { $0.key == key }
     }
 
     private func push(_ ref: TitleRef) {
@@ -414,7 +447,9 @@ final class AppModel: ObservableObject {
                 if rows.isEmpty {
                     streamsError = "\(api) returned no streams for this title"
                     pendingAutoPlay = nil
-                } else if autoPlay, let first = rows.first {
+                } else if let resume = pendingAutoPlay, let first = rows.first {
+                    // pendingAutoPlay is staged either by the autoPlay argument OR by a Play
+                    // pressed while this very fetch was in flight — consume whoever staged it.
                     pendingAutoPlay = nil
                     play(first, resume: resume)
                 }
@@ -503,8 +538,26 @@ final class AppModel: ObservableObject {
     /// headless run can reproduce a playback path. Verification knobs:
     ///   AUTOPLAY_TYPE=series AUTOPLAY_ID=1399 AUTOPLAY_SEASON=1 AUTOPLAY_EPISODE=1
     ///   EPISODE_NEXT_AFTER=<sec>  presses ] (next episode / season boundary) mid-playback
+    ///   MINI_AFTER=<sec>          backs out of the player to the mini-player
+    ///   EXPAND_AFTER=<sec>        returns from the mini-player to the full player
+    ///   STREAMS_AFTER=<sec>       opens the streams drawer over the player
+    ///   RESUME_FIRST=1            launches into the player via Continue Watching resume
+    /// OPEN_DETAIL=1 (without AUTOPLAY) opens the hero page without playing — screenshot hook.
     func autoTestIfRequested() {
         let env = ProcessInfo.processInfo.environment
+        if env["RESUME_FIRST"] != nil, let first = store.items.first {
+            MPVController.log("RESUME_FIRST: \(first.key) @\(Int(first.position))s")
+            resume(first)
+            return
+        }
+        if env["AUTOPLAY"] == nil, env["OPEN_DETAIL"] != nil {
+            providerMode = .fourk
+            section = .discover
+            let type = env["OPEN_DETAIL_TYPE"] == "series" ? "series" : "movie"
+            let id = Int(env["OPEN_DETAIL_ID"] ?? "") ?? 1083381
+            openById(type: type, id: id, season: nil, episode: nil)
+            return
+        }
         guard env["AUTOPLAY"] != nil else { return }
         providerMode = .fourk
         section = .discover
@@ -523,6 +576,21 @@ final class AppModel: ObservableObject {
             }
             if let first = streams.first {
                 play(first)
+                if let secs = Double(env["MINI_AFTER"] ?? "") {
+                    try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
+                    playback.dismissToMini()
+                    MPVController.log("MINI_AFTER fired — mode=\(playback.mode)")
+                }
+                if let secs = Double(env["EXPAND_AFTER"] ?? "") {
+                    try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
+                    playback.mode = .watching
+                    MPVController.log("EXPAND_AFTER fired — mode=\(playback.mode)")
+                }
+                if let secs = Double(env["STREAMS_AFTER"] ?? "") {
+                    try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
+                    playback.showStreams = true
+                    MPVController.log("STREAMS_AFTER fired — drawer open")
+                }
                 if let secs = Double(env["EPISODE_NEXT_AFTER"] ?? "") {
                     try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
                     let ok = await advanceEpisode(1)

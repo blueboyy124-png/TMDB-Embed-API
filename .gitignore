@@ -5,5 +5,6 @@ restart.trigger
 .DS_Store
 providers/.cache/
 .build/
+build/
 utils/*.corrupt-*
 /tmp_context

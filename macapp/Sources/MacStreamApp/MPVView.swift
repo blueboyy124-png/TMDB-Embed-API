@@ -276,14 +276,18 @@ final class MPVController {
         }
     }
 
-    func readPosition(_ cb: @escaping (Double, Double) -> Void) {
+    func readPosition(_ cb: @escaping (Double, Double, Bool) -> Void) {
         cmdQueue.async { [weak self] in
             guard let h = self?.handle else { return }
             var t: Double = 0, d: Double = 0
             mpv_get_property(h, "time-pos", MPV_FORMAT_DOUBLE, &t)
             mpv_get_property(h, "duration", MPV_FORMAT_DOUBLE, &d)
-            let tt = t, dd = d
-            DispatchQueue.main.async { cb(tt, dd) }
+            // core-idle: mpv is waiting (on the network cache) rather than decoding. Paused
+            // is idle too — the caller combines this with its own isPlaying to tell them apart.
+            var idle: Int32 = 0
+            mpv_get_property(h, "core-idle", MPV_FORMAT_FLAG, &idle)
+            let tt = t, dd = d, ii = idle != 0
+            DispatchQueue.main.async { cb(tt, dd, ii) }
         }
     }
 
