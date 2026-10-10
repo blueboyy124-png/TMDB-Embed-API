@@ -134,10 +134,24 @@ final class MPVController {
         // Debug/status socket: a running player can be interrogated (playback-time,
         // hwdec-current, paused-for-cache) without touching the app.
         mpv_set_option_string(h, "input-ipc-server", "/tmp/mpvsock")
-        // Cap buffering: a 70GB unseekable file otherwise eats gigabytes while
-        // mpv retries seeks that restart the download from zero.
-        mpv_set_option_string(h, "demuxer-max-bytes", "150MiB")
+        // Packet-cache sizing. The cap still keeps a 70GB unseekable file from eating
+        // gigabytes while mpv retries seeks that restart the download from zero, but
+        // 2000p remuxes run at 30–60 Mbps: 150MiB was only ~25s of 4K, so short network
+        // dips underran playback that a wider window rides through. 300MiB ≈ a minute
+        // of 4K — still bounded, still an order of magnitude under "gigabytes".
+        // readahead applies when the packet cache is off (mpv ignores it for cached
+        // network streams, where cache-secs/max-bytes rule); 1s was tuned for local
+        // files, 20 is the same "ride out a hiccup" intent for that path.
+        mpv_set_option_string(h, "demuxer-max-bytes", "300MiB")
         mpv_set_option_string(h, "demuxer-max-back-bytes", "50MiB")
+        mpv_set_option_string(h, "demuxer-readahead-secs", "20")
+        // Audio language: prefer English. Verified against mpv: when no track matches
+        // alang, mpv falls back to the file's default track — i.e. the original
+        // language — so English-first never means silence. Settings "Original" skips
+        // alang entirely and the file's default wins outright.
+        if UserDefaults.standard.string(forKey: "audioLang") != "orig" {
+            mpv_set_option_string(h, "alang", "en,eng")
+        }
 
         // The render context has to exist before the first loadfile, or mpv
         // falls back to a VO that creates its own window.
@@ -276,7 +290,7 @@ final class MPVController {
         }
     }
 
-    func readPosition(_ cb: @escaping (Double, Double, Bool) -> Void) {
+    func readPosition(_ cb: @escaping (Double, Double, Bool, Int64) -> Void) {
         cmdQueue.async { [weak self] in
             guard let h = self?.handle else { return }
             var t: Double = 0, d: Double = 0
@@ -286,10 +300,36 @@ final class MPVController {
             // is idle too — the caller combines this with its own isPlaying to tell them apart.
             var idle: Int32 = 0
             mpv_get_property(h, "core-idle", MPV_FORMAT_FLAG, &idle)
-            let tt = t, dd = d, ii = idle != 0
-            DispatchQueue.main.async { cb(tt, dd, ii) }
+            // cache-speed: bytes/sec flowing into the cache over a 1s window (0 when the
+            // source is dead or no cache is engaged). This is what tells a buffer-FILL in
+            // progress apart from a genuine mid-play stall — core-idle alone cannot.
+            var speed: Int64 = 0
+            mpv_get_property(h, "cache-speed", MPV_FORMAT_INT64, &speed)
+            let tt = t, dd = d, ii = idle != 0, ss = speed
+            DispatchQueue.main.async { cb(tt, dd, ii, ss) }
         }
     }
+
+    /// The active audio track's language tag ("en", "ja", …); nil when mpv can't say
+    /// (nothing loaded, or a video with no audio). Pull-based like everything else in
+    /// this controller — libmpv here runs without an event loop, so the tick polls.
+    func readAudioLang(_ cb: @escaping (String?) -> Void) {
+        cmdQueue.async { [weak self] in
+            guard let h = self?.handle else { return }
+            var out: String?
+            var lang: UnsafeMutablePointer<CChar>? = nil
+            if mpv_get_property(h, "current-tracks/audio/lang", MPV_FORMAT_STRING, &lang) >= 0,
+               let lang {
+                out = String(cString: lang)
+                mpv_free(UnsafeMutableRawPointer(lang))
+            }
+            DispatchQueue.main.async { cb(out) }
+        }
+    }
+
+    /// The top-bar audio chip's click: move to the next audio track (original language
+    /// included) on the running player. The chip refreshes on the next poll.
+    func cycleAudio() { command("cycle audio") }
 
     func seek(to seconds: Double) {
         cmdQueue.async { [weak self] in

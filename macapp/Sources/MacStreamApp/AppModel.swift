@@ -63,6 +63,12 @@ final class AppModel: ObservableObject {
     @Published var providerMode: ProviderMode {
         didSet { UserDefaults.standard.set(providerMode.rawValue, forKey: "providerMode") }
     }
+    /// "en" (default: English audio when the stream has it, original as fallback) or
+    /// "orig" (the file's default track wins). Read by mpv at startup — applies to
+    /// playback started from then on.
+    @Published var audioLang: String {
+        didSet { UserDefaults.standard.set(audioLang, forKey: "audioLang") }
+    }
 
     // MARK: discover
     @Published var trending: [SearchResult] = []
@@ -112,6 +118,7 @@ final class AppModel: ObservableObject {
         } else {
             providerMode = .fourk
         }
+        audioLang = defaults.string(forKey: "audioLang") ?? "en"
         let store = ContinueStore()
         self.store = store
         self.playback = PlaybackController(store: store)
@@ -609,26 +616,34 @@ final class AppModel: ObservableObject {
 
     // MARK: self-test hook
 
-    /// POISON_REFUSED=n / POISON_EMPTY=n (self-test only): rewrite rows before the autoplay
-    /// preflight so both failure paths can be exercised on a day when every real link works.
+    /// POISON_REFUSED=n / POISON_EMPTY=n / POISON_SLOW=n (self-test only): rewrite rows
+    /// before the autoplay preflight so the failure paths can be exercised on a day when
+    /// every real link works.
     ///   POISON_REFUSED — first n rows point at a closed port (probe fails → preflight skips them)
     ///   POISON_EMPTY   — the next n rows serve a valid but segmentless playlist (probe passes,
     ///                    mpv never paints → the first-frame watchdog has to deal with them)
+    ///   POISON_SLOW    — the next n rows stream from a local server that bursts then
+    ///                    trickles (first frame paints, then cache-fill with bytes still
+    ///                    flowing → the stall banner must NOT fire; killing the server
+    ///                    drops the rate to 0 and it must fire)
     private func poisonRowsIfRequested() {
         let env = ProcessInfo.processInfo.environment
         let refused = Int(env["POISON_REFUSED"] ?? "") ?? 0
         let empty = Int(env["POISON_EMPTY"] ?? "") ?? 0
-        guard refused > 0 || empty > 0 else { return }
+        let slow = Int(env["POISON_SLOW"] ?? "") ?? 0
+        guard refused > 0 || empty > 0 || slow > 0 else { return }
         for i in streams.indices {
             if i < refused {
                 streams[i].url = "http://127.0.0.1:9/refused-\(i).m3u8"
-            } else if i >= refused && i < refused + empty {
+            } else if i < refused + empty {
                 // Unique path per row — the drawer keys rows by provider+url, and three
                 // identical URLs collapse into one identity (and one checkmark).
                 streams[i].url = "http://127.0.0.1:8687/poison-\(i).m3u8"
+            } else if i < refused + empty + slow {
+                streams[i].url = "http://127.0.0.1:8687/slow-\(i).mp4"
             }
         }
-        MPVController.log("POISON applied: \(refused) refused + \(empty) empty-playlist rows")
+        MPVController.log("POISON applied: \(refused) refused + \(empty) empty-playlist + \(slow) slow rows")
     }
 
     /// AUTOPLAY=1 opens Backrooms on 4khdhub and plays the first row with no clicks, so a
@@ -654,6 +669,10 @@ final class AppModel: ObservableObject {
             let type = env["OPEN_DETAIL_TYPE"] == "series" ? "series" : "movie"
             let id = Int(env["OPEN_DETAIL_ID"] ?? "") ?? 1083381
             openById(type: type, id: id, season: nil, episode: nil)
+            return
+        }
+        if env["OPEN_SETTINGS"] != nil {   // screenshot hook for the Settings sections
+            section = .settings
             return
         }
         guard env["AUTOPLAY"] != nil else { return }

@@ -82,6 +82,44 @@ dead at the CDN.
   frames take ~10s end-to-end), never guessed. Mid-play freezes are still the
   stall *offer*'s territory — see Keyboard below.
 
+### English audio, original language always reachable
+
+Auto-play is English-first: mpv starts with `alang=en,eng`, so a dual-audio
+row opens on its English track instead of the provider's default (usually
+Hindi). If a file has no English track mpv falls back to the file's own
+default — the original language — rather than failing. Settings → Audio has
+the preference (`English` / `Original`, default English); *Original* drops
+`alang` entirely and trusts the file.
+
+The top bar shows what mpv **actually** selected (polled from mpv's
+`current-tracks/audio/lang`, not guessed from the row title) as a clickable
+chip — clicking cycles audio tracks, so the original language stays one click
+away. The streams drawer marks English-capable rows (`EN`, green), rows whose
+only named language is Hindi/Tamil/Telugu/Sub (orange), dual-audio rows
+(`Multi`), and silently sorts English-capable + unnamed-language rows first —
+every row stays visible and manually pickable.
+
+### Buffering and stalls
+
+- The buffering spinner has hysteresis both ways: ~1.5s of continuous
+  underrun before it shows, ~2s of clean playback before it hides (a choppy
+  stretch must not blink it). Before the first frame — and between `start()`
+  and mpv attaching — it tracks immediately, because there the spinner *is*
+  the loading indicator.
+- `demuxer-max-bytes` is 300 MiB (≈1 minute of 4K) with a 20s readahead, so
+  a healthy-but-slow CDN refills the buffer instead of starving the decoder.
+- A mid-play freeze raises the stall offer only when the source is actually
+  starved: mpv's `cache-speed` (1s-window bytes/sec) must be under 4 KB/s
+  while cache-idle. A slow-but-flowing source (tested at 30 KB/s end-to-end)
+  never raises the banner — bytes are still arriving, so waiting beats
+  switching — and an offer already on screen retracts when the source recovers
+  before you act on it. Dead sources (`in=0 B/s`) still fire within 15s as
+  before.
+- Playback state (`pos`/`dur`/`buffering`) lives in a nested `PlayerClock`
+  observable: the 2×/sec tick updates invalidate only the scrubber and
+  spinner, not every view in the window that holds the controller (the
+  browsing grid used to re-diff on every tick during playback).
+
 ### Streams drawer
 
 Hover the player and press `s` (or click “Streams”) for a right-side drawer
@@ -102,13 +140,21 @@ option).
   truly gone, which also keeps the last frame visible during teardown.
 - Resume and row switches use mpv's per-file `start=` option
   (`loadfile <url> replace start=<sec>`), so the first frame lands at the saved
-  position instead of flashing 0:00 and jumping.
+  position instead of flashing 0:00 and jumping. A row swap that happens before
+  the first frame (watchdog advance, link-checker move-off) keeps the resume
+  intent — mpv's position is still 0 there, so it is carried from the original
+  token, not recomputed.
 - Continue Watching is flushed every 10s while playing and on stop, dropped at
   ≥95% or <15s. Resume skips the detail page and drops you straight into the
   full-window player at the saved position.
 - MKV plays fine through mpv; slowness on remux rows is upstream CDN bandwidth
   (~2–3.5 MB/s), which is why the buffering spinner is honest about it and the
   drawer shows source/sizes.
+- Poster/still loading goes through `ImageStore`: an NSCache (count- and
+  cost-capped) over a disk-backed URLCache, with in-flight requests
+  de-duplicated — a scrolling grid never re-downloads a poster it already
+  showed (a poster's URL never changes, so URLSession's cache alone evicts
+  under pressure and refetches).
 
 ## Keyboard
 
@@ -120,9 +166,12 @@ they also pass through when a text field, slider, table or button has focus
 (while watching, the hidden browsing UI never swallows player keys).
 
 Stalls **offer, don't auto-switch**: if a started picture freezes for 15s
-mid-play, a banner asks “Switch to next row (⏎) / Dismiss (⎋)”. End of file
-and paused players never trigger it; rows that never start at all are the
-first-frame watchdog's job (see Play determinism above).
+mid-play **and the source is actually starved** (mpv `cache-speed` under
+4 KB/s — a slow-but-flowing source just keeps buffering, and an offer
+retracts if the source recovers before you act), a banner asks “Switch to
+next row (⏎) / Dismiss (⎋)”. End of file and paused players never trigger
+it; rows that never start at all are the first-frame watchdog's job (see
+Play determinism above).
 
 ## Verification hooks
 
@@ -136,7 +185,9 @@ Environment variables for headless test runs (ignored in normal use):
 | `AUTOPLAY_MODE=All` | Fetch via the aggregate live feed instead of the provider-direct route |
 | `POISON_REFUSED=<n>` | Rewrite the first n rows to a closed port (preflight must skip them) |
 | `POISON_EMPTY=<n>` | Next n rows serve a valid but segmentless playlist (watchdog must catch them; run in the default 4khdhub mode) |
+| `POISON_SLOW=<n>` | Next n rows stream from a local server that bursts then trickles (stall-suppression: a flowing source must NOT raise the banner; killing the server must) |
 | `OPEN_DETAIL=1` (+ `_TYPE`/`_ID`) | Open the hero page without playing (screenshot hook) |
+| `OPEN_SETTINGS=1` | Open Settings (screenshot hook) |
 | `RESUME_FIRST=1` | Launch into the player via the first Continue Watching item |
 | `STOP_AFTER=<sec>` | Press Stop that many seconds after playback starts |
 | `RELOAD_AFTER=<sec>` | With `STOP_AFTER`: stop + full rebuild at the deadline |
@@ -152,5 +203,8 @@ watchdog strikes, stall offers, teardown).
 `/tmp/mpvsock` is an mpv IPC socket while a player is live
 (`echo '{"command":["get_property","pause"]}' | socat - /tmp/mpvsock`).
 
-Capture screenshots with Quartz rather than `screencapture -l` — the latter
-returns wrong-window content when another app occupies the same coordinates.
+Screenshots: `screencapture -x -l<id>` with a window id from
+`/tmp/mcap --list` (filter `owner=MacStream` for the dev binary, `MacStream`
+for the bundle). The old Quartz route is gone — `CGWindowListCreateImage` is
+compile-time obsoleted in the macOS 26 SDK and the dlsym workaround returns
+no image; `screencapture -l` picks the exact window and is the supported path.

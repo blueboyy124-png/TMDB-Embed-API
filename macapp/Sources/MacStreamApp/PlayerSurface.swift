@@ -35,7 +35,9 @@ struct PlayerSurface: View {
                 tapToTogglePlay
                 if controlsVisible { topBar }
                 if controlsVisible { bottomTransport }
-                if pb.buffering { ProgressView().controlSize(.large) }
+                // Clock-observing child: tick updates (2×/sec) invalidate THIS small view,
+                // not the whole surface (whose body also holds the drawer's row list).
+                BufferingSpinner(clock: pb.clock)
                 if let msg = pb.notice {
                     // Watchdog status ("Row 2 wouldn't load — trying the next one…"): sits
                     // above the transport, doesn't take hits (the video tap owns those).
@@ -80,8 +82,9 @@ struct PlayerSurface: View {
         )
         .shadow(color: .black.opacity(pb.mode == .mini ? 0.6 : 0), radius: pb.mode == .mini ? 12 : 0)
         .onContinuousHover { _ in
-            // Any hover activity re-arms the auto-hide timer (which only hides while playing).
-            MPVController.log("hover fired (mode=\(pb.mode))")
+            // Any hover activity re-arms the auto-hide timer (which only hides while
+            // playing). No log here: reveal() already logs the actual visible transition,
+            // and logging every mouse-moved event produced hundreds of lines per session.
             reveal()
         }
         .onAppear { reveal() }
@@ -135,7 +138,11 @@ struct PlayerSurface: View {
             .help("Back to browsing — keeps playing (Esc)")
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(pb.context?.title ?? "Now playing")
+                // During the load, context isn't set yet (playFromDetail/resume enter the
+                // player screen before streams resolve) — fall back to the detail title so
+                // the top bar says the same thing as the loading screen underneath it,
+                // instead of a bare "Now playing".
+                Text(pb.context?.title ?? app.detail?.title ?? "Now playing")
                     .font(.headline).lineLimit(1)
                 if let sub = pb.context?.subtitle {
                     Text(sub).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -149,6 +156,23 @@ struct PlayerSurface: View {
                 if let l = s.languageLabel {
                     Text(l).font(.caption2).foregroundStyle(.secondary)
                 }
+            }
+            // What mpv is ACTUALLY playing (alang may have chosen English over the
+            // file's original default, or the user's settings asked for original).
+            // Click cycles to the next audio track — both languages stay reachable.
+            if let track = pb.audioTrackLabel {
+                Button { pb.player?.cycleAudio() } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "waveform")
+                        Text(track)
+                    }
+                    .font(.caption2)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(Capsule().fill(Color.white.opacity(0.18)))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.white)
+                .help("Active audio track — click to switch (original language included)")
             }
             Spacer()
             Button { pb.stop() } label: {
@@ -249,21 +273,8 @@ struct PlayerSurface: View {
     }
 
     private var scrubber: some View {
-        HStack(spacing: 10) {
-            Text(pb.fmt(pb.pos)).font(.caption).monospacedDigit()
-                .frame(width: 46, alignment: .trailing)
-            Slider(value: Binding(
-                get: { pb.pos },
-                set: { pb.pos = $0 }
-            ), in: 0...max(pb.dur, 1), onEditingChanged: { editing in
-                pb.scrubbing = editing
-                if !editing { pb.player?.seek(to: pb.pos) }
-            })
-            .disabled(pb.player == nil || pb.dur <= 0)
-            Text(pb.fmt(pb.dur)).font(.caption).monospacedDigit()
-                .frame(width: 46, alignment: .leading)
-        }
-        .foregroundStyle(.white.opacity(0.9))
+        // Own observer pair: pos/dur tick 2×/sec, and this is the only view that cares.
+        ScrubberBar(pb: pb, clock: pb.clock)
     }
 
     // MARK: mini-player
@@ -319,7 +330,7 @@ struct PlayerSurface: View {
                 }
             } else {
                 ProgressView().controlSize(.large)
-                Text(app.detail?.title ?? pb.context?.title ?? "Loading…")
+                Text(pb.context?.title ?? app.detail?.title ?? "Loading…")
                     .font(.headline)
                 Text("Finding streams…").font(.callout).foregroundStyle(.secondary)
             }
@@ -372,8 +383,8 @@ struct PlayerSurface: View {
 
             ScrollView {
                 VStack(spacing: 3) {
-                    ForEach(Array(pb.rows.enumerated()), id: \.element.id) { index, s in
-                        streamRow(index, s)
+                    ForEach(drawnRowIndices, id: \.self) { index in
+                        streamRow(index, pb.rows[index])
                     }
                 }
             }
@@ -390,6 +401,16 @@ struct PlayerSurface: View {
         .transition(.move(edge: .trailing))
     }
 
+    /// Drawer order: English-capable and no-signal rows first, explicitly-other rows
+    /// after — stable within each group, so the server's quality order still decides
+    /// ties. The REAL index rides along: switching and the selected check use server
+    /// indices, this only reorders what the drawer displays.
+    private var drawnRowIndices: [Int] {
+        let first = pb.rows.indices.filter { pb.rows[$0].audioSortsFirst }
+        let rest = pb.rows.indices.filter { !pb.rows[$0].audioSortsFirst }
+        return first + rest
+    }
+
     private func streamRow(_ index: Int, _ s: Stream) -> some View {
         let selected = index == pb.rowIndex
         return Button {
@@ -404,7 +425,19 @@ struct PlayerSurface: View {
                     HStack(spacing: 6) {
                         Text(s.quality ?? "?").font(.callout.weight(.medium))
                         if let l = s.languageLabel {
-                            Text(l).font(.caption2).foregroundStyle(.secondary)
+                            Text(l).font(.caption2)
+                                .foregroundStyle(languageColor(l))
+                        }
+                        // Badge the rest: the row's explicit language token, unless the
+                        // label on the left already says it (no duplicates — a "Dub"
+                        // label already reads green, it doesn't need "EN" too). Green
+                        // can play English, orange is explicitly something else;
+                        // silence (no token at all) shows nothing.
+                        if let b = s.audioBadge,
+                           b.caseInsensitiveCompare(s.languageLabel ?? "") != .orderedSame,
+                           !(b == "EN" && s.languageLabel != nil) {
+                            Text(b).font(.caption2)
+                                .foregroundStyle(s.audioBadgeIsEnglish ? Color.green : Color.orange)
                         }
                         if s.container == "mkv" {
                             Text("MKV").font(.caption2).foregroundStyle(.orange)
@@ -425,6 +458,15 @@ struct PlayerSurface: View {
         }
         .buttonStyle(.plain)
         .help(s.displayTitle)
+    }
+
+    /// Sub/Dub labels colored to match the badge scheme: Dub = English track (green),
+    /// Sub = original audio with subtitles (orange), anything else neutral.
+    private func languageColor(_ label: String) -> Color {
+        let l = label.lowercased()
+        if l.hasPrefix("sub") { return .orange }
+        if l.hasPrefix("dub") { return .green }
+        return .secondary
     }
 
     // MARK: keys help
@@ -450,5 +492,48 @@ struct PlayerSurface: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
         .foregroundStyle(.white)
         .frame(maxHeight: .infinity, alignment: .center)
+    }
+}
+
+/// Position + seek slider, as its own clock observer: pos/dur tick 2×/sec, and without
+/// this split those ticks re-evaluated the whole surface (drawer row list included).
+/// Scrubbing writes the clock directly; the tick loop itself skips reads while
+/// `pb.scrubbing` is set, so the drag value is never fought over.
+private struct ScrubberBar: View {
+    @ObservedObject var pb: PlaybackController
+    @ObservedObject var clock: PlayerClock
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(pb.fmt(clock.pos)).font(.caption).monospacedDigit()
+                .frame(width: 46, alignment: .trailing)
+            Slider(value: Binding(
+                get: { clock.pos },
+                set: { clock.pos = $0 }
+            ), in: 0...max(clock.dur, 1), onEditingChanged: { editing in
+                pb.scrubbing = editing
+                if !editing { pb.player?.seek(to: clock.pos) }
+            })
+            .disabled(pb.player == nil || clock.dur <= 0)
+            Text(pb.fmt(clock.dur)).font(.caption).monospacedDigit()
+                .frame(width: 46, alignment: .leading)
+        }
+        .foregroundStyle(.white.opacity(0.9))
+    }
+}
+
+/// The buffering spinner, observing the clock alone for the same reason as ScrubberBar.
+private struct BufferingSpinner: View {
+    @EnvironmentObject var pb: PlaybackController
+    @ObservedObject var clock: PlayerClock
+    var body: some View {
+        // `clock.buffering` covers underruns (tick-driven, hysteresis in updateBuffering).
+        // The second term closes the attach gap: start() sets `current` synchronously, so
+        // the chips and video mount in the same frame — but the tick loop hasn't wired up
+        // mpv yet, so buffering is still false. Without this, one frame (often several)
+        // shows chrome over a black screen with no indicator at all.
+        if clock.buffering || (pb.current != nil && pb.player == nil) {
+            ProgressView().controlSize(.large)
+        }
     }
 }

@@ -35,6 +35,19 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
 
+            Section("Audio") {
+                Picker("Prefer", selection: $app.audioLang) {
+                    Text("English (original as fallback)").tag("en")
+                    Text("Original language").tag("orig")
+                }
+                .pickerStyle(.segmented)
+                Text("English picks the English audio track when the stream has one and falls "
+                     + "back to the file's original language otherwise; Original never overrides. "
+                     + "Applies to playback started from then on — the waveform chip in the player "
+                     + "shows the active track, click it to switch.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("Open by TMDB ID") {
                 HStack {
                     Picker("Type", selection: $openType) {

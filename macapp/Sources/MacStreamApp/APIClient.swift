@@ -61,6 +61,55 @@ struct Stream: Identifiable, Decodable, Hashable {
     var displayTitle: String { title ?? name ?? provider ?? "stream" }
 }
 
+extension Stream {
+    /// Lowercased word tokens of every field that can carry a language signal.
+    private var audioTokens: [String] {
+        [language, languageLabel, sourceTitle, title, name, tag]
+            .compactMap { $0 }
+            .flatMap { $0.split { !$0.isLetter && !$0.isNumber }.map { $0.lowercased() } }
+    }
+
+    /// The most salient language token on this row, for the drawer badge — the rule is
+    /// "badge the rest": anything that says what the audio is gets shown, silence gets
+    /// nothing (these providers' silent rows are usually English).
+    ///
+    /// - "Multi": can play English AND names another language — "[Hindi + English]"
+    ///   releases and anime Dual/Multi tags. Green: the user's ask (English with the
+    ///   original available) is satisfied.
+    /// - "Hindi"/"Tamil"/"Telugu"/"Sub": explicitly not English-first. Orange.
+    /// - "EN": tagged English only. Green.
+    var audioBadge: String? {
+        let t = Set(audioTokens)
+        let english = t.contains("en") || t.contains("eng") || t.contains("english")
+            || t.contains("dual") || t.contains("multi")
+            || t.contains { $0.hasPrefix("dub") }
+        let other = ["hindi", "tamil", "telugu"].first { t.contains($0) }
+            ?? (t.contains { $0.hasPrefix("sub") } ? "Sub" : nil)
+        let named = t.contains("dual") || t.contains("multi")
+        if english && other != nil { return "Multi" }
+        if let other { return other }
+        if named { return "Multi" }
+        if english { return "EN" }
+        return nil
+    }
+
+    /// Drawer ordering: English-capable rows (tagged English, "Dual"/"Multi" — both
+    /// include an English track — anime "Dub") and rows that say nothing at all
+    /// (probably English) sort first; rows that are explicitly something else
+    /// (Hindi-only, "Sub" = original audio) sort after. Stable within each group,
+    /// so the server's quality order still decides ties.
+    var audioSortsFirst: Bool {
+        guard let b = audioBadge else { return true }   // no signal → first
+        return !["Hindi", "Tamil", "Telugu", "Sub"].contains(b)
+    }
+
+    /// Badge color: green = can play English, orange = explicitly something else.
+    var audioBadgeIsEnglish: Bool {
+        guard let b = audioBadge else { return false }
+        return ["EN", "Multi"].contains(b)
+    }
+}
+
 struct StreamsResponse: Decodable {
     let success: Bool?
     let count: Int?

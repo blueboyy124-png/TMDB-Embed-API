@@ -1,6 +1,20 @@
 import SwiftUI
 import AppKit
 
+/// The fast-changing half of playback state, nested so it can be observed separately:
+/// PlaybackController is injected window-root as an @EnvironmentObject, and the tick loop
+/// writes pos/dur/buffering twice a second — as @Published on the controller, every tick
+/// re-rendered the entire window (the browsing grid re-diffing during playback was the
+/// baseline jank). Views that display the clock (scrubber, buffering spinner) observe this
+/// object directly; everything else only re-renders when the controller publishes an event
+/// that matters.
+@MainActor
+final class PlayerClock: ObservableObject {
+    @Published var pos: Double = 0
+    @Published var dur: Double = 0
+    @Published var buffering = false
+}
+
 // Everything about a stream that is currently on screen: the mpv controller, transport state,
 // the stall watcher, row switching, and resume. Extracted from AppModel so navigation and
 // playback can change independently — you can browse while something plays, and the player
@@ -39,7 +53,8 @@ final class PlaybackController: ObservableObject {
     @Published var mode: PlayerMode = .idle
     /// True while mpv is waiting on the network (cache-idle while meant to be playing) —
     /// the buffering spinner. A paused player is core-idle too, hence `isPlaying`.
-    @Published var buffering = false
+    /// Stored in `clock` (nested observable, see below); this is a pass-through.
+    var buffering: Bool { get { clock.buffering } set { clock.buffering = newValue } }
 
     @Published var current: Stream?
     @Published var context: Context?
@@ -49,8 +64,14 @@ final class PlaybackController: ObservableObject {
     @Published var rowIndex: Int?
 
     @Published var player: MPVController?
-    @Published var pos: Double = 0
-    @Published var dur: Double = 0
+    /// pos/dur/buffering live in `clock`, NOT here: the tick loop writes them twice a
+    /// second, and this controller is injected window-root as an @EnvironmentObject —
+    /// @Published here meant the whole browsing UI re-diffed on every tick during
+    /// playback (the baseline jank). pb now publishes only on meaningful events;
+    /// views that show the clock observe `pb.clock` directly.
+    let clock = PlayerClock()
+    var pos: Double { get { clock.pos } set { clock.pos = newValue } }
+    var dur: Double { get { clock.dur } set { clock.dur = newValue } }
     @Published var scrubbing = false
     @Published var isPlaying = true
     @Published var volume: Double = 100
@@ -60,6 +81,10 @@ final class PlaybackController: ObservableObject {
     @Published var showKeysHelp = false
     /// The streams drawer in the player: manual row picking, opt-in (auto-play is the default).
     @Published var showStreams = false
+    /// Language tag of the audio track mpv actually selected (from current-tracks);
+    /// nil until the first read. Drives the top-bar audio chip — cleared on every
+    /// row switch / stop so a stale chip never labels a different stream.
+    @Published var audioTrackLang: String?
 
     /// Consumed by MPVView the moment the URL changes: mpv's `start=` per-file option puts the
     /// first frame at this position instead of flashing 0:00 and then jumping. It is rewritten
@@ -73,6 +98,9 @@ final class PlaybackController: ObservableObject {
     private var lastMove = Date()
     private var didFirstFrame = false
     private var stallDismissed = false
+    /// Spinner hysteresis: when the current want-to-buffer / recovered streak began.
+    private var bufferingSince: Date?
+    private var bufferingClearSince: Date?
     private var lastSaved = Date.distantPast
     private var tickCount = 0
     private var testDeadline: Date?
@@ -129,6 +157,10 @@ final class PlaybackController: ObservableObject {
         lastMove = Date()
         rowLoadStarted = Date()
         startMisses = 0
+        buffering = false
+        bufferingSince = nil
+        bufferingClearSince = nil
+        audioTrackLang = nil
         isPlaying = true
         lastStart = (stream, rows, context, resume)
         MPVController.log("play selected: \(stream.displayTitle.prefix(60))\(resume > 1 ? " @\(Int(resume))s" : "")")
@@ -175,6 +207,9 @@ final class PlaybackController: ObservableObject {
         notice = nil
         lastPos = -1
         lastStart = nil
+        bufferingSince = nil
+        bufferingClearSince = nil
+        audioTrackLang = nil
     }
 
     /// Back out of the full player WITHOUT stopping: the video shrinks to the mini-player card
@@ -223,7 +258,12 @@ final class PlaybackController: ObservableObject {
     /// the movie from zero.
     func switchRow(to index: Int, auto: Bool = false) {
         guard rows.indices.contains(index), index != rowIndex else { return }
-        resumeToken = pos.isFinite && pos > 2 ? pos : 0
+        // Position carry: the running picture's pos wins. If the current row never painted
+        // (pos stuck at 0), the resume intent lives in resumeToken — a watchdog advance or
+        // a link-checker move-off must not zero it, or resuming a film restarts it at 0:00
+        // whenever the first row dies before its first frame. A picture that DID paint and
+        // sits ≤2s in (a deliberate restart) still carries 0, as before.
+        resumeToken = pos.isFinite && pos > 2 ? pos : (didFirstFrame ? 0 : resumeToken)
         rowIndex = index
         didFirstFrame = false
         stallOffer = nil
@@ -231,6 +271,9 @@ final class PlaybackController: ObservableObject {
         lastPos = -1
         lastMove = Date()
         rowLoadStarted = Date()
+        bufferingSince = nil
+        bufferingClearSince = nil
+        audioTrackLang = nil
         if !auto { startMisses = 0 }   // a watchdog advance spends the same budget instead
         isPlaying = true
         lastStart = (rows[index], rows, context ?? lastStart?.2 ?? Context(title: ""), resumeToken)
@@ -313,8 +356,8 @@ final class PlaybackController: ObservableObject {
         //   STOP_AFTER=<sec>    presses Stop for us (teardown path)
         //   RELOAD_AFTER=<sec>  stop + full rebuild (new controller, new attach)
         //   SWITCH_AFTER=<sec>  mid-playback row switch on the running player
-        if let secs = ProcessInfo.processInfo.environment["STOP_AFTER"].flatMap({ Double($0) }),
-           let deadline = testDeadline {
+        // testDeadline is only ever set when STOP_AFTER parses (see start()).
+        if let deadline = testDeadline {
             if Date() >= deadline {
                 testDeadline = nil
                 if ProcessInfo.processInfo.environment["RELOAD_AFTER"] != nil {
@@ -343,12 +386,22 @@ final class PlaybackController: ObservableObject {
             }
         }
         guard player != nil, !scrubbing else { return }
+        // Audio chip: which track mpv actually chose (alang may have picked English over
+        // the file's original default). Every 2s — pull-based like the rest of the loop.
+        if tickCount % 4 == 0 {
+            player?.readAudioLang { [weak self] lang in
+                guard let self else { return }
+                guard lang != audioTrackLang else { return }
+                audioTrackLang = lang
+                MPVController.log("audio track lang -> \(lang ?? "none")")
+            }
+        }
         // Async: reading mpv properties touches the same internal lock that once wedged main.
-        player?.readPosition { [weak self] t, d, coreIdle in
+        player?.readPosition { [weak self] t, d, coreIdle, cacheSpeed in
             guard let self else { return }
             pos = t.isFinite ? t : 0
             if d > 0 { dur = d }
-            buffering = coreIdle && isPlaying
+            updateBuffering(coreIdle: coreIdle)
             if pos > 0.5 && !didFirstFrame {
                 didFirstFrame = true
                 startMisses = 0
@@ -384,13 +437,26 @@ final class PlaybackController: ObservableObject {
                 lastMove = Date()
                 stallOffer = nil          // recovered on its own
                 stallDismissed = false
+            } else if coreIdle, isPlaying, cacheSpeed >= 4096 {
+                // A cache-fill that is still pulling bytes is not a stall: a slow 4K
+                // start (or a mid-file dip the wider cache is riding out) can sit still
+                // past 15s while the buffer builds — the spinner covers that, and firing
+                // the banner there was the false-offer bug. Wire progress keeps the clock
+                // fresh and retracts an offer if the source comes back; a dead source
+                // reads 0 B/s here and the banner fires exactly as before.
+                lastMove = Date()
+                if stallOffer != nil {
+                    stallOffer = nil
+                    stallDismissed = false
+                    MPVController.log("stall retracted: source resumed at \(cacheSpeed) B/s")
+                }
             } else if didFirstFrame && isPlaying && Date().timeIntervalSince(lastMove) > 15 {
                 // End of file is not a stall: pos parked at the duration means the video
                 // FINISHED, and offering "switch to the next row" there would be nonsense.
                 let atEnd = dur > 0 && pos >= dur - 0.5
                 if stallOffer == nil && !stallDismissed && !atEnd {
                     stallOffer = StallOffer(canSwitch: rows.count > 1)
-                    MPVController.log("STALL detected at pos=\(pos) (rows=\(rows.count))")
+                    MPVController.log("STALL detected at pos=\(pos) (rows=\(rows.count), in=\(cacheSpeed) B/s)")
                 }
             }
             // Continue Watching: on stop via flushProgress(), plus every 10s while playing —
@@ -399,6 +465,53 @@ final class PlaybackController: ObservableObject {
                 flushProgress()
             }
         }
+    }
+
+    /// The buffering spinner, with hysteresis: it must persist ~1.5s before showing (a
+    /// micro-underrun must not flash it) and ~2s of clean playback before hiding (a choppy
+    /// stretch must not blink it). Before the first frame there is no picture to protect —
+    /// there the spinner IS the loading indicator, so it tracks the state immediately.
+    private func updateBuffering(coreIdle: Bool) {
+        let want = coreIdle && isPlaying
+        guard didFirstFrame else {
+            if buffering != want { buffering = want }
+            bufferingSince = nil
+            bufferingClearSince = nil
+            return
+        }
+        if want {
+            bufferingClearSince = nil
+            if bufferingSince == nil { bufferingSince = Date() }
+            if !buffering, Date().timeIntervalSince(bufferingSince!) >= 1.5 {
+                buffering = true
+                MPVController.log("buffering: spinner on (underrun persisted past 1.5s)")
+            }
+        } else {
+            bufferingSince = nil
+            guard buffering else { return }
+            if !isPlaying {                 // paused: nothing to wait for, hide now
+                buffering = false
+                bufferingClearSince = nil
+                return
+            }
+            if bufferingClearSince == nil { bufferingClearSince = Date() }
+            if Date().timeIntervalSince(bufferingClearSince!) >= 2 {
+                buffering = false
+                bufferingClearSince = nil
+                MPVController.log("buffering: spinner off (2s clean)")
+            }
+        }
+    }
+
+    /// Human label for the active audio track, for the top-bar chip. English gets its
+    /// name; other tags show as the raw code; a track that says nothing shows "Unknown".
+    /// nil until mpv has answered (the chip stays hidden during a load).
+    var audioTrackLabel: String? {
+        guard let l = audioTrackLang else { return nil }
+        let t = l.trimmingCharacters(in: .whitespaces).lowercased()
+        if t.isEmpty || t == "und" || t == "unknown" { return "Unknown" }
+        if t.hasPrefix("en") { return "English" }
+        return t
     }
 
     /// Writes the current position for the CURRENT context. Call before replacing the context
