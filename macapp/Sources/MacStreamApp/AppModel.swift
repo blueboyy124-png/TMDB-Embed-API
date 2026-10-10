@@ -126,12 +126,21 @@ final class AppModel: ObservableObject {
 
     private func liveArrived() {
         streams = live.arrived
+        // Keep a running player's row list in step with the feed (raw rows land early, the
+        // link-checked payload supersedes them later — see PlaybackController.refreshRows).
+        playback.refreshRows(streams)
         if streamsElapsed == nil, let maxArrival = live.arrived.map(\.arrivalMs).max() {
             streamsElapsed = maxArrival
         }
-        if let resume = pendingAutoPlay, let first = streams.first {
+        if let resume = pendingAutoPlay, !streams.isEmpty {
             pendingAutoPlay = nil
-            play(first, resume: resume)
+            let snapshot = streams
+            // Probe candidates while the loading spinner already covers the wait — auto-play
+            // must not open on a row we can see is dead.
+            Task { [weak self] in
+                guard let self else { return }
+                play(await preflight(snapshot), resume: resume)
+            }
         }
         objectWillChange.send()
     }
@@ -206,8 +215,13 @@ final class AppModel: ObservableObject {
     /// auto-play. `resume` is the saved position when the title is partially watched.
     func playFromDetail(resume: Double = 0) {
         playback.mode = .watching
-        if let first = streams.first {
-            play(first, resume: resume)
+        if !streams.isEmpty {
+            let snapshot = streams
+            // Preflight picks the first live row; the spinner is already up while it probes.
+            Task { [weak self] in
+                guard let self else { return }
+                play(await preflight(snapshot), resume: resume)
+            }
         } else if !isLoadingStreams {
             playSelected(resume: resume)
         } else {
@@ -447,11 +461,14 @@ final class AppModel: ObservableObject {
                 if rows.isEmpty {
                     streamsError = "\(api) returned no streams for this title"
                     pendingAutoPlay = nil
-                } else if let resume = pendingAutoPlay, let first = rows.first {
+                } else if let resume = pendingAutoPlay, !rows.isEmpty {
                     // pendingAutoPlay is staged either by the autoPlay argument OR by a Play
                     // pressed while this very fetch was in flight — consume whoever staged it.
                     pendingAutoPlay = nil
-                    play(first, resume: resume)
+                    Task { [weak self] in
+                        guard let self else { return }
+                        play(await preflight(rows), resume: resume)
+                    }
                 }
             } catch {
                 streamsError = error.localizedDescription
@@ -475,6 +492,64 @@ final class AppModel: ObservableObject {
     /// Plays a row from the current stream list, with the current title as context.
     func play(_ stream: Stream, resume: Double = 0) {
         playback.start(stream, rows: streams, context: makeContext(), resume: resume)
+    }
+
+    // MARK: row preflight
+
+    /// Auto-play used to trust `rows.first` blindly. When a provider's CDN gates every link
+    /// (Febbox/shegu answers 403 across the board some days), that is an endless spinner on
+    /// row 1 while live rows sit unused below it. This probes the top candidates through the
+    /// exact URLs mpv will use and returns the first that actually answers. Probes are tiny
+    /// (Range headers, ≤1KB) and run in parallel; if every probe fails the row list is tried
+    /// blind anyway, because a probe can lie but the player cannot.
+    func preflight(_ rows: [Stream]) async -> Stream {
+        let candidates = Array(rows.prefix(10))
+        guard candidates.count > 1, candidates.first?.url != nil else { return rows[0] }
+        let results = await withTaskGroup(of: (Int, Bool).self) { group -> [(Int, Bool)] in
+            for (i, row) in candidates.enumerated() {
+                group.addTask { (i, await self.probeRow(row)) }
+            }
+            var out: [(Int, Bool)] = []
+            for await r in group { out.append(r) }
+            return out
+        }
+        let alive = results.filter { $0.1 }.map { $0.0 }.sorted()
+        if let best = alive.first {
+            if best > 0 {
+                MPVController.log("preflight: row \(best + 1) is the first live row (\(alive.count)/\(candidates.count) probed alive)")
+            }
+            return candidates[best]
+        }
+        MPVController.log("preflight: no live rows in the top \(candidates.count) — trying row 1 blind")
+        return rows[0]
+    }
+
+    /// True when the row's URL answers 2xx with something plausibly playable (playlists must
+    /// actually look like a playlist — the m3u8-proxy answers dead links with a JSON error).
+    private func probeRow(_ row: Stream) async -> Bool {
+        guard let url = URL(string: row.url) else { return false }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 5
+        req.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: req)
+            defer { bytes.task.cancel() }
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                return false
+            }
+            let isPlaylist = row.url.lowercased().contains(".m3u8")
+                || response.mimeType?.range(of: "mpegurl", options: .caseInsensitive) != nil
+            guard isPlaylist else { return true }   // media: the status is enough; cancel via defer
+            var head = ""
+            for try await line in bytes.lines {
+                head += line + "\n"
+                if head.contains("#EXTM3U") { return true }
+                if head.count > 512 { return false }
+            }
+            return false
+        } catch {
+            return false
+        }
     }
 
     func makeContext() -> PlaybackController.Context {
@@ -534,9 +609,32 @@ final class AppModel: ObservableObject {
 
     // MARK: self-test hook
 
+    /// POISON_REFUSED=n / POISON_EMPTY=n (self-test only): rewrite rows before the autoplay
+    /// preflight so both failure paths can be exercised on a day when every real link works.
+    ///   POISON_REFUSED — first n rows point at a closed port (probe fails → preflight skips them)
+    ///   POISON_EMPTY   — the next n rows serve a valid but segmentless playlist (probe passes,
+    ///                    mpv never paints → the first-frame watchdog has to deal with them)
+    private func poisonRowsIfRequested() {
+        let env = ProcessInfo.processInfo.environment
+        let refused = Int(env["POISON_REFUSED"] ?? "") ?? 0
+        let empty = Int(env["POISON_EMPTY"] ?? "") ?? 0
+        guard refused > 0 || empty > 0 else { return }
+        for i in streams.indices {
+            if i < refused {
+                streams[i].url = "http://127.0.0.1:9/refused-\(i).m3u8"
+            } else if i >= refused && i < refused + empty {
+                // Unique path per row — the drawer keys rows by provider+url, and three
+                // identical URLs collapse into one identity (and one checkmark).
+                streams[i].url = "http://127.0.0.1:8687/poison-\(i).m3u8"
+            }
+        }
+        MPVController.log("POISON applied: \(refused) refused + \(empty) empty-playlist rows")
+    }
+
     /// AUTOPLAY=1 opens Backrooms on 4khdhub and plays the first row with no clicks, so a
     /// headless run can reproduce a playback path. Verification knobs:
     ///   AUTOPLAY_TYPE=series AUTOPLAY_ID=1399 AUTOPLAY_SEASON=1 AUTOPLAY_EPISODE=1
+    ///   AUTOPLAY_MODE=All           use the aggregate live feed instead of the provider-direct route
     ///   EPISODE_NEXT_AFTER=<sec>  presses ] (next episode / season boundary) mid-playback
     ///   MINI_AFTER=<sec>          backs out of the player to the mini-player
     ///   EXPAND_AFTER=<sec>        returns from the mini-player to the full player
@@ -559,7 +657,10 @@ final class AppModel: ObservableObject {
             return
         }
         guard env["AUTOPLAY"] != nil else { return }
-        providerMode = .fourk
+        // AUTOPLAY_MODE=4khdhub|anime|All picks the fetch path — provider-direct JSON vs the
+        // aggregate live feed (which is the one carrying the link-checked `done` payload).
+        // Default stays 4khdhub, the app's default provider.
+        providerMode = env["AUTOPLAY_MODE"].flatMap(ProviderMode.init(rawValue:)) ?? .fourk
         section = .discover
         let type = env["AUTOPLAY_TYPE"] == "series" ? "series" : "movie"
         let id = Int(env["AUTOPLAY_ID"] ?? "") ?? 1083381
@@ -574,8 +675,14 @@ final class AppModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 waited += 1
             }
-            if let first = streams.first {
-                play(first)
+            poisonRowsIfRequested()
+            if !streams.isEmpty {
+                // Same path a real press takes: preflight picks the first live row. Hold the
+                // snapshot so a live-feed row swap mid-proflight can't mix poisoned picks
+                // with unpoisoned rows inside the player.
+                let snap = streams
+                let best = await preflight(snap)
+                playback.start(best, rows: snap, context: makeContext())
                 if let secs = Double(env["MINI_AFTER"] ?? "") {
                     try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
                     playback.dismissToMini()

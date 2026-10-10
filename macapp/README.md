@@ -59,6 +59,29 @@ triangle) into an `.iconset`, then `iconutil` compiles it to `.icns`.
 Backing out of the player (Esc or the ⌄ button) always goes to mini first —
 the movie never stops just because you went looking for something else.
 
+### Play determinism
+
+Auto-play never trusts a row blindly anymore — the Spider-Man "won't play"
+bug was exactly that: the first rows to arrive were raw, unvalidated, and
+dead at the CDN.
+
+- **Preflight** probes the top 10 rows in parallel through the exact URLs mpv
+  will use (≤1KB Range/playlist-head reads) and auto-play picks the first one
+  that answers. A probe that fails is skipped; if every probe fails the list is
+  still tried in order, because a probe can lie but the player cannot.
+- **The live feed's final `done` event** carries the API's link-checked payload
+  (dead links already probed out). Raw `stream` events were only an early
+  preview — the app now supersedes them wholesale, and `refreshRows` re-syncs a
+  running player's row list on every arrival, so the watchdog always has real
+  alternates and a link-checked-out current row is moved off (never if the
+  picture already started — an interruption of a working stream is worse than
+  a stale index).
+- **First-frame watchdog**: no picture within 14s → "Row N wouldn't load —
+  trying the next one…", up to 3 auto-advances, then a quiet give-up: player
+  pauses and the streams drawer opens. The bar is measured (proxy-HLS first
+  frames take ~10s end-to-end), never guessed. Mid-play freezes are still the
+  stall *offer*'s territory — see Keyboard below.
+
 ### Streams drawer
 
 Hover the player and press `s` (or click “Streams”) for a right-side drawer
@@ -96,10 +119,10 @@ watching→mini → mini→stop. Shortcuts pass through when ⌘ is held; in min
 they also pass through when a text field, slider, table or button has focus
 (while watching, the hidden browsing UI never swallows player keys).
 
-Stalls **offer, don't auto-switch**: if the picture freezes for 15s mid-play —
-*or never starts at all* (dead row, expired embed token) — a banner asks
-“Switch to next row (⏎) / Dismiss (⎋)”. End of file and paused players never
-trigger the offer.
+Stalls **offer, don't auto-switch**: if a started picture freezes for 15s
+mid-play, a banner asks “Switch to next row (⏎) / Dismiss (⎋)”. End of file
+and paused players never trigger it; rows that never start at all are the
+first-frame watchdog's job (see Play determinism above).
 
 ## Verification hooks
 
@@ -110,6 +133,9 @@ Environment variables for headless test runs (ignored in normal use):
 | `AUTOPLAY=1` | Open the test title and play the first row with no clicks |
 | `AUTOPLAY_TYPE` / `AUTOPLAY_ID` | Title to open (default `movie` / `1083381` Backrooms) |
 | `AUTOPLAY_SEASON` / `AUTOPLAY_EPISODE` | Episode to preselect for a series |
+| `AUTOPLAY_MODE=All` | Fetch via the aggregate live feed instead of the provider-direct route |
+| `POISON_REFUSED=<n>` | Rewrite the first n rows to a closed port (preflight must skip them) |
+| `POISON_EMPTY=<n>` | Next n rows serve a valid but segmentless playlist (watchdog must catch them; run in the default 4khdhub mode) |
 | `OPEN_DETAIL=1` (+ `_TYPE`/`_ID`) | Open the hero page without playing (screenshot hook) |
 | `RESUME_FIRST=1` | Launch into the player via the first Continue Watching item |
 | `STOP_AFTER=<sec>` | Press Stop that many seconds after playback starts |
@@ -121,7 +147,8 @@ Environment variables for headless test runs (ignored in normal use):
 | `STREAMS_AFTER=<sec>` | Open the streams drawer over the player |
 
 Playback state is logged with an `[mpv]` prefix (attach chain, first frame,
-loadfile, mode changes, hover/reveal/hide, key events, stall offers, teardown).
+loadfile, mode changes, hover/reveal/hide, key events, preflight picks,
+watchdog strikes, stall offers, teardown).
 `/tmp/mpvsock` is an mpv IPC socket while a player is live
 (`echo '{"command":["get_property","pause"]}' | socat - /tmp/mpvsock`).
 

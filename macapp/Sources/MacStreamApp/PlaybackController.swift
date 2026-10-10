@@ -93,6 +93,29 @@ final class PlaybackController: ObservableObject {
 
     /// Starts (or switches into) a stream. If something was already playing, its position is
     /// flushed to Continue Watching first, then the context is replaced.
+    // MARK: first-frame watchdog state
+
+    /// When the current row was (re)loaded — the watchdog's clock. Set by start() and
+    /// switchRow(); never by the poll.
+    private var rowLoadStarted = Date()
+    /// Consecutive rows that never produced a picture. Reset on first frame, on a new
+    /// selection, and on MANUAL switches (your pick gets its own fresh budget).
+    private var startMisses = 0
+
+    /// Transient status line over the player (watchdog progress, give-up message).
+    @Published var notice: String?
+    private var noticeTask: Task<Void, Never>?
+
+    func notice(_ message: String) {
+        MPVController.log("notice: \(message)")
+        noticeTask?.cancel()
+        notice = message
+        noticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if !Task.isCancelled { self?.notice = nil }
+        }
+    }
+
     func start(_ stream: Stream, rows: [Stream], context: Context, resume: Double = 0) {
         flushProgress()
         self.context = context
@@ -104,6 +127,8 @@ final class PlaybackController: ObservableObject {
         stallDismissed = false
         lastPos = -1
         lastMove = Date()
+        rowLoadStarted = Date()
+        startMisses = 0
         isPlaying = true
         lastStart = (stream, rows, context, resume)
         MPVController.log("play selected: \(stream.displayTitle.prefix(60))\(resume > 1 ? " @\(Int(resume))s" : "")")
@@ -146,6 +171,8 @@ final class PlaybackController: ObservableObject {
         pos = 0; dur = 0
         resumeToken = 0
         stallOffer = nil
+        startMisses = 0
+        notice = nil
         lastPos = -1
         lastStart = nil
     }
@@ -194,7 +221,7 @@ final class PlaybackController: ObservableObject {
     /// Switches to another row of the SAME load. Position is carried over (set as the new
     /// resume token), because a row switch — especially a stall-driven one — must not restart
     /// the movie from zero.
-    func switchRow(to index: Int) {
+    func switchRow(to index: Int, auto: Bool = false) {
         guard rows.indices.contains(index), index != rowIndex else { return }
         resumeToken = pos.isFinite && pos > 2 ? pos : 0
         rowIndex = index
@@ -203,20 +230,50 @@ final class PlaybackController: ObservableObject {
         stallDismissed = false
         lastPos = -1
         lastMove = Date()
+        rowLoadStarted = Date()
+        if !auto { startMisses = 0 }   // a watchdog advance spends the same budget instead
         isPlaying = true
         lastStart = (rows[index], rows, context ?? lastStart?.2 ?? Context(title: ""), resumeToken)
         MPVController.log("row switch -> #\(index + 1) \(rows[index].displayTitle.prefix(50))")
         current = rows[index]
     }
 
-    func switchRowRelative(_ delta: Int) {
+    func switchRowRelative(_ delta: Int, auto: Bool = false) {
         guard let i = rowIndex else {
-            if !rows.isEmpty { switchRow(to: delta > 0 ? 0 : rows.count - 1) }
+            if !rows.isEmpty { switchRow(to: delta > 0 ? 0 : rows.count - 1, auto: auto) }
             return
         }
         let target = i + delta
         guard rows.indices.contains(target) else { return }
-        switchRow(to: target)
+        switchRow(to: target, auto: auto)
+    }
+
+    /// Re-sync the row list with the live feed, which keeps changing AFTER playback starts:
+    /// raw provider rows land in ~2.5s, the link-checked `done` payload supersedes them ~10s
+    /// later. A list captured at start() goes stale — the watchdog could exhaust its strikes
+    /// against a dead first row while 30 better rows had already arrived. Called on every
+    /// arrival; the current row keeps playing, only the list (and the index) refresh.
+    func refreshRows(_ with: [Stream]) {
+        guard current != nil, !with.isEmpty else { return }
+        guard mode == .watching || mode == .mini else { return }
+        rows = with
+        if let id = current?.id, let idx = with.firstIndex(where: { $0.id == id }) {
+            rowIndex = idx
+            return
+        }
+        // Our row vanished from the list — the link-checker dropped it as dead. A row that
+        // never painted gets moved off immediately (the check has proof; the drawer would
+        // not even offer it). A row that is ALREADY playing is never interrupted: the probe
+        // can lie, and an interruption of a working picture is worse than a stale index —
+        // switch fallbacks handle rowIndex == nil whenever the user actually switches.
+        if !didFirstFrame {
+            MPVController.log("refreshRows: current row link-checked out — moving to row 1")
+            rowIndex = nil                       // clear the stale index or switchRow's `index != rowIndex` guard can no-op
+            switchRow(to: 0, auto: true)
+        } else {
+            MPVController.log("refreshRows: playing row link-checked out — index unbound, playback continues")
+            rowIndex = nil
+        }
     }
 
     // MARK: stall offer
@@ -294,24 +351,46 @@ final class PlaybackController: ObservableObject {
             buffering = coreIdle && isPlaying
             if pos > 0.5 && !didFirstFrame {
                 didFirstFrame = true
+                startMisses = 0
                 MPVController.log("first frame at pos=\(pos)")
             }
+            // First-frame watchdog: a row that never produces a picture (dead CDN link,
+            // expired signature, garbage playlist) is not something buffering can fix —
+            // advance instead of spinning on it. Three strikes open the drawer so the
+            // choice becomes manual, with the player paused rather than looping forever.
+            // The 14s bar is measured, not guessed: proxy-HLS first frames take ~10s
+            // (mpv --frames=1 on a checked-clean row: 9.9s end-to-end), so anything
+            // under that false-kills rows that WERE about to play — the exact bug class
+            // this watchdog exists to prevent, inverted.
+            if !didFirstFrame, isPlaying, rowIndex != nil,
+               Date().timeIntervalSince(rowLoadStarted) > 14 {
+                startMisses += 1
+                if startMisses < 3, let i = rowIndex, rows.indices.contains(i + 1) {
+                    notice("Row \(i + 1) wouldn't load — trying the next one…")
+                    MPVController.log("watchdog: row \(i + 1) never started — advancing (\(startMisses)/3)")
+                    switchRow(to: i + 1, auto: true)
+                } else {
+                    notice("This stream won't load — pick another row")
+                    MPVController.log("watchdog: giving up after \(startMisses) dead row(s)")
+                    isPlaying = false
+                    showStreams = true
+                }
+            }
             // Stall watch: picture started but no progress for 15s while meant to be playing
-            // means the source stopped sending usable data.
+            // means the source stopped sending usable data. Never-started rows are the
+            // watchdog's job above, not this banner's.
             if pos != lastPos {
                 lastPos = pos
                 lastMove = Date()
                 stallOffer = nil          // recovered on its own
                 stallDismissed = false
-            } else if isPlaying && Date().timeIntervalSince(lastMove) > 15 {
+            } else if didFirstFrame && isPlaying && Date().timeIntervalSince(lastMove) > 15 {
                 // End of file is not a stall: pos parked at the duration means the video
                 // FINISHED, and offering "switch to the next row" there would be nonsense.
-                // No first frame yet is a stall TOO: a dead row (expired embed token, garbage
-                // playlist) would otherwise spin the loading state forever with no way out.
                 let atEnd = dur > 0 && pos >= dur - 0.5
                 if stallOffer == nil && !stallDismissed && !atEnd {
                     stallOffer = StallOffer(canSwitch: rows.count > 1)
-                    MPVController.log("STALL detected at pos=\(pos) firstFrame=\(didFirstFrame) (rows=\(rows.count))")
+                    MPVController.log("STALL detected at pos=\(pos) (rows=\(rows.count))")
                 }
             }
             // Continue Watching: on stop via flushProgress(), plus every 10s while playing —

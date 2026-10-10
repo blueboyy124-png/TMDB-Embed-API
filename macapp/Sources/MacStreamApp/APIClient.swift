@@ -44,7 +44,8 @@ struct EpisodeInfo: Decodable, Hashable {
 struct Stream: Identifiable, Decodable, Hashable {
     let title: String?
     let name: String?
-    let url: String
+    /// Mutable so the self-test poison hook can rewrite row endpoints (see AppModel).
+    var url: String
     let quality: String?
     let provider: String?
     let sourceTitle: String?
@@ -197,6 +198,7 @@ final class LiveStreamFeed: NSObject, URLSessionDataDelegate {
     private var task: URLSessionTask?
     private var buffer = ""
     private var seen = Set<String>()               // provider names already applied
+    private var finalized = false                  // `done` landed: the raw feed is now historical
     private var session: URLSession?
 
     func start(type: String, id: Int, season: Int?, episode: Int?, server: String, deadline: Int = 30000) {
@@ -207,6 +209,7 @@ final class LiveStreamFeed: NSObject, URLSessionDataDelegate {
         errorText = nil
         isLoading = true
         seen = []
+        finalized = false
 
         var path: String
         if type == "movie" {
@@ -276,25 +279,18 @@ final class LiveStreamFeed: NSObject, URLSessionDataDelegate {
     private func apply(_ event: String, _ obj: [String: Any]) {
         switch event {
         case "stream":
+            guard !finalized else { return }   // `done` superseded the raw feed; a straggler must not resurrect it
             let provider = obj["provider"] as? String ?? "?"
             guard !seen.contains(provider) else { return }    // one event per provider; idempotent anyway
             seen.insert(provider)
             let arrival = obj["arrivalMs"] as? Int ?? 0
             for raw in (obj["streams"] as? [[String: Any]]) ?? [] {
-                guard let u = raw["url"] as? String, !u.isEmpty else { continue }
-                let base = Stream(
-                    title: raw["title"] as? String, name: raw["name"] as? String, url: u,
-                    quality: raw["quality"] as? String, provider: raw["provider"] as? String ?? provider,
-                    sourceTitle: raw["sourceTitle"] as? String,
-                    languageLabel: raw["languageLabel"] as? String, language: raw["language"] as? String,
-                    tag: raw["tag"] as? String, container: raw["container"] as? String
-                )
-                // Raw provider output carries no container; derive it from the URL now so
-                // the UI can label rows (MKV, mp4, ...) while they are still streaming in.
-                arrived.append(base.derived().withArrival(arrival))
+                guard let row = makeRow(raw, providerFallback: provider, arrival: arrival) else { continue }
+                arrived.append(row)
             }
         case "done":
             stopReason = obj["stopReason"] as? String
+            supersedeWithCheckedPayload(obj)
             isLoading = false
             finished = true
         case "error":
@@ -303,6 +299,49 @@ final class LiveStreamFeed: NSObject, URLSessionDataDelegate {
         default:
             break
         }
+    }
+
+    /// Parses one row from either a raw `stream` event or the link-checked `done` payload.
+    private func makeRow(_ raw: [String: Any], providerFallback: String, arrival: Int) -> Stream? {
+        guard let u = raw["url"] as? String, !u.isEmpty else { return nil }
+        let base = Stream(
+            title: raw["title"] as? String, name: raw["name"] as? String, url: u,
+            quality: raw["quality"] as? String, provider: raw["provider"] as? String ?? providerFallback,
+            sourceTitle: raw["sourceTitle"] as? String,
+            languageLabel: raw["languageLabel"] as? String, language: raw["language"] as? String,
+            tag: raw["tag"] as? String, container: raw["container"] as? String
+        )
+        // Raw provider output carries no container; derive it from the URL now so
+        // the UI can label rows (MKV, mp4, ...) while they are still streaming in.
+        return base.derived().withArrival(arrival)
+    }
+
+    /// `done` carries the COMPLETE, enriched, link-checked payload — dead links have already
+    /// been probed out of it. The early `stream` events were only ever a preview; keeping
+    /// them (what this did until the play-determinism work) meant the list — and auto-play's
+    /// "first row" — held rows the API had just proved dead, which is how a title could
+    /// "not play" while perfectly good rows sat further down. Replace wholesale on arrival,
+    /// carrying each surviving row's earlier arrival time across so fetch-timing displays
+    /// don't jump at the moment of supersede.
+    private func supersedeWithCheckedPayload(_ obj: [String: Any]) {
+        guard let final = obj["streams"] as? [[String: Any]], !final.isEmpty else { return }
+        let providerMs = obj["providerTimings"] as? [String: Int] ?? [:]
+        let totalMs = (obj["timings"] as? [String: Any])?["totalMs"] as? Int ?? 0
+        let prior = Dictionary(arrived.map { ($0.url, $0.arrivalMs) }, uniquingKeysWith: { first, _ in first })
+        var rebuilt: [Stream] = []
+        rebuilt.reserveCapacity(final.count)
+        for raw in final {
+            guard let u = raw["url"] as? String else { continue }
+            let provider = raw["provider"] as? String ?? "?"
+            let arrival = prior[u] ?? providerMs[provider] ?? totalMs
+            if let row = makeRow(raw, providerFallback: provider, arrival: arrival) {
+                rebuilt.append(row)
+            }
+        }
+        guard !rebuilt.isEmpty else { return }
+        MPVController.log("done: link-checked payload supersedes raw rows (\(arrived.count) -> \(rebuilt.count))")
+        arrived = rebuilt
+        finalized = true
     }
 }
 

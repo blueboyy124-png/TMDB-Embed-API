@@ -123,42 +123,86 @@ const getCookieForRequest = async (regionPreference = null, userCookie = null) =
     }
 };
 
-// Helper function to fetch stream size using a HEAD request
-const fetchStreamSize = async (url) => {
-    const cacheSubDir = 'stream_sizes';
-    // Create a cache key from the URL using hash to avoid long filenames
-    const urlHash = crypto.createHash('md5').update(url).digest('hex');
-    const urlCacheKey = `${urlHash}.txt`;
+// Probe a resolved link for BOTH size and liveness, folding the liveness check into the
+// size wave that already existed. Febbox/shegu sign their links, and when the signature
+// gates (every link answers 403 at once) the app used to receive those rows as if they
+// were fine — auto-play trusted the first one and spun forever while live rows sat below
+// it. A definitive 4xx/5xx marks the row dead; a timeout or network wobble does NOT (a
+// slow CDN is not a dead CDN, and a false "dead" hides a playable row). Dead markers are
+// remembered for 30 minutes so a re-request does not re-probe every URL; this cache has
+// no TTL of its own, hence the explicit timestamp check.
+const DEAD_MARKER_TTL_MS = 30 * 60 * 1000;
 
-    const cachedSize = await getFromCache(urlCacheKey, cacheSubDir);
-    if (cachedSize !== null) { // Check for null specifically, as 'Unknown size' is a valid cached string
-        // console.log(`  CACHE HIT for stream size: ${url} -> ${cachedSize}`);
-        return cachedSize;
+const fetchStreamProbe = async (url) => {
+    const lower = url.toLowerCase();
+    const livenessKey = crypto.createHash('md5').update(url).digest('hex') + '.json';
+
+    const cachedMarker = await getFromCache(livenessKey, 'stream_liveness');
+    if (cachedMarker && typeof cachedMarker === 'object' && (Date.now() - (cachedMarker.ts || 0)) < DEAD_MARKER_TTL_MS) {
+        if (cachedMarker.dead) return { size: 'Unknown size', dead: true };
+        if (cachedMarker.alive) {
+            const sizeCacheKey = `${crypto.createHash('md5').update(url).digest('hex')}.txt`;
+            return { size: await getFromCache(sizeCacheKey, 'stream_sizes') || cachedMarker.size || 'Unknown size', dead: false };
+        }
     }
-    // console.log(`  CACHE MISS for stream size: ${url}`);
+
+    const rememberDead = async (status) => {
+        await saveToCache(livenessKey, { dead: true, status, ts: Date.now() }, 'stream_liveness');
+    };
+    const rememberAlive = async (size) => {
+        await saveToCache(livenessKey, { alive: true, size, ts: Date.now() }, 'stream_liveness');
+    };
 
     try {
-        // For m3u8, Content-Length is for the playlist file, not the stream segments.
-        if (url.toLowerCase().includes('.m3u8')) {
-            return 'Playlist (size N/A)'; // Indicate HLS playlist
+        // Playlists were skipped entirely before (their byte size is unknowable) — which is
+        // exactly why dead HLS rows shipped as if fine. A headers-only GET with an immediate
+        // abort tells dead from alive without downloading anything.
+        if (lower.includes('.m3u8')) {
+            const res = await axios.get(url, {
+                timeout: 4000,
+                responseType: 'stream',
+                headers: { Range: 'bytes=0-1023', 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36' }
+            });
+            res.data.destroy?.();
+            await rememberAlive('Playlist (size N/A)');
+            return { size: 'Playlist (size N/A)', dead: false };
         }
         const response = await axios.head(url, { timeout: 5000 }); // 5-second timeout for HEAD request
+        let size = 'Unknown size';
         if (response.headers['content-length']) {
             const sizeInBytes = parseInt(response.headers['content-length'], 10);
             if (!isNaN(sizeInBytes)) {
-                if (sizeInBytes < 1024) return `${sizeInBytes} B`;
-                if (sizeInBytes < 1024 * 1024) return `${(sizeInBytes / 1024).toFixed(2)} KB`;
-                if (sizeInBytes < 1024 * 1024 * 1024) return `${(sizeInBytes / (1024 * 1024)).toFixed(2)} MB`;
-                return `${(sizeInBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+                if (sizeInBytes < 1024) size = `${sizeInBytes} B`;
+                else if (sizeInBytes < 1024 * 1024) size = `${(sizeInBytes / 1024).toFixed(2)} KB`;
+                else if (sizeInBytes < 1024 * 1024 * 1024) size = `${(sizeInBytes / (1024 * 1024)).toFixed(2)} MB`;
+                else size = `${(sizeInBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
             }
         }
-        return 'Unknown size';
+        await rememberAlive(size);
+        return { size, dead: false };
     } catch (error) {
-        // console.warn(`  Could not fetch size for ${url}: ${error.message}`);
-        // Cache the error/unknown result too, to prevent re-fetching a known problematic URL quickly
-        await saveToCache(urlCacheKey, 'Unknown size', cacheSubDir);
-        return 'Unknown size';
+        const status = error.response && error.response.status;
+        if (status && status >= 400) {
+            console.log(`[Showbox] dead link (${status}): ${url}`);
+            await rememberDead(status);
+            return { size: 'Unknown size', dead: true };
+        }
+        // Timeout / DNS / reset: unknown, not dead. Cache the size outcome as before so we
+        // do not hammer it, but leave the row in place.
+        await saveToCache(`${crypto.createHash('md5').update(url).digest('hex')}.txt`, 'Unknown size', 'stream_sizes');
+        return { size: 'Unknown size', dead: false };
     }
+};
+
+// Dead rows are kept, never dropped — a probe can lie (timeout misread as a gate, a CDN that
+// recovered moments later) and silently hiding rows would be dishonest. But they sink below
+// everything that answered cleanly, in original order within each group, so auto-play's
+// "first row" is never something we PROVED unusable.
+const sortDeadLast = (streams) => {
+    const live = streams.filter(s => !s.linkDead);
+    const dead = streams.filter(s => s.linkDead);
+    if (dead.length === 0 || live.length === 0) return streams;
+    return [...live, ...dead];
 };
 
 const FEBBOX_PLAYER_URL = "https://www.febbox.com/file/player";
@@ -2050,11 +2094,13 @@ const getStreamsFromTmdbId = async (tmdbType, tmdbId, seasonNum = null, episodeN
     const nestedStreams = await Promise.all(streamPromises);
     const allStreams = nestedStreams.flat();
 
-    // Fetch sizes for all streams concurrently
+    // Probe sizes + liveness for all streams concurrently (one wave, one probe per URL)
     if (allStreams.length > 0) {
         console.time(`getStreamsFromTmdbId_fetchStreamSizes_${tmdbType}_${tmdbId}`);
         const sizePromises = allStreams.map(async (stream) => {
-            stream.size = await fetchStreamSize(stream.url);
+            const probe = await fetchStreamProbe(stream.url);
+            stream.size = probe.size;
+            stream.linkDead = probe.dead;
             return stream;
         });
         await Promise.all(sizePromises); // removed unused streamsWithSizes var
@@ -2100,8 +2146,15 @@ const getStreamsFromTmdbId = async (tmdbType, tmdbId, seasonNum = null, episodeN
             console.log(`  ... and ${finalFilteredStreams.length - 5} more streams`);
         }
     }
+    // Probed-dead rows are kept (a probe can lie; the row may still work through the proxy
+    // or later) but sorted to the end, so auto-play never opens on a link we KNOW answers
+    // 403. Order within each group is preserved.
+    const deadCount = finalFilteredStreams.filter(s => s.linkDead).length;
+    if (deadCount > 0) {
+        console.log(`[Showbox] ${deadCount}/${finalFilteredStreams.length} links probed dead (4xx/5xx) — sorted last`);
+    }
     console.timeEnd(mainTimerLabel);
-    return finalFilteredStreams;
+    return sortDeadLast(finalFilteredStreams);
 };
 
 // Function to handle TV shows with seasons and episodes
@@ -3111,6 +3164,8 @@ module.exports = {
     extractFidsFromFebboxPage,
     processShowWithSeasonsEpisodes,
     sortStreamsByQuality,
+    fetchStreamProbe,
+    sortDeadLast,
     getStreamsFromPStreamAPI,
     processPStreamResponse,
     getTmdbDataForPStream,

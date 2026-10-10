@@ -36,6 +36,21 @@ struct PlayerSurface: View {
                 if controlsVisible { topBar }
                 if controlsVisible { bottomTransport }
                 if pb.buffering { ProgressView().controlSize(.large) }
+                if let msg = pb.notice {
+                    // Watchdog status ("Row 2 wouldn't load — trying the next one…"): sits
+                    // above the transport, doesn't take hits (the video tap owns those).
+                    Text(msg)
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Capsule().fill(.black.opacity(0.78)))
+                        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .padding(.bottom, 100)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
                 if pb.showKeysHelp { keysHelp }
                 if pb.stallOffer != nil { stallBanner }
                 if pb.showStreams { streamsDrawer }
