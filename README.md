@@ -77,13 +77,30 @@ npm start
 # node apiServer.js
 
 # 4. Open the Admin UI (login page) in browser
-http://192.168.86.75:8787/
+http://localhost:8787/
 
 # 5. Health check
-curl http://192.168.86.75:8787/api/health
+curl http://localhost:8787/api/health
 ```
 
 **Default credentials (first run):** `admin` / `change-me` — **change them immediately** from the dashboard or via `POST /auth/change-password`.
+
+### 🌐 Access from another device on the same Wi‑Fi
+The server binds **every** network interface by default (`BIND_HOST=0.0.0.0`), so once it is
+running you can open it from any phone, tablet, or computer on the same network — no extra setup.
+
+```bash
+# Find this machine's address
+ipconfig getifaddr en0        # macOS; use `ip addr` (Linux) or `ipconfig` (Windows) elsewhere
+```
+Then on the other device browse to **`http://<that-ip>:8787/`** (e.g. `http://192.168.86.75:8787/`).
+The startup banner prints the exact URL to copy, one line per interface.
+
+- If it will not connect: allow incoming connections for `node` in **System Settings → Network →
+  Firewall**, and make sure `BIND_HOST` is not set to `127.0.0.1` (loopback-only — the banner warns
+  if it is).
+- On Bonjour/mDNS networks the machine name also works: `http://<name>.local:8787/`.
+- Everything stays on your local network; nothing is exposed to the internet.
 
 ---
 

@@ -35,20 +35,31 @@ watch.
   not the UI you are building.
 - There is a `.verify/` folder with shell test scripts and `curl` recipes if you want examples.
 
-### How to serve your frontend
+### How to serve your frontend (and make it work across the whole Wi‑Fi)
 
-Because the API emits a global CORS header (`Access-Control-Allow-Origin: *`), you can serve the
-frontend from **any** local static server, e.g.:
+**Recommended:** drop the files into the API's own `public/` folder in a subfolder, e.g.
+`TMDB-Embed-API/public/Streamer/` with an `index.html` inside, and open
+**`http://localhost:8787/Streamer/`**. The API already serves `public/` statically, so you get one
+process, one URL, and — because the page and the API share an origin — the proxied stream URLs can
+never mismatch. Call the API with **relative paths** (`/api/streams/...`, `/api/search?...`) and it
+works from any host automatically.
 
+That last point matters because the server binds **all** interfaces (`0.0.0.0`), so the same page
+is reachable from other devices on the Wi‑Fi at `http://<mac-ip>:8787/Streamer/` — no changes
+needed, because a relative `/api/...` call goes to whatever host served the page.
+
+Alternative: serve the folder from any static server on its own port:
 ```
 cd <your-web-folder>
 python3 -m http.server 5500
 # open http://localhost:5500
 ```
+If you do this, the site is only on `localhost` unless you also make it listen on `0.0.0.0`
+(`python3 -m http.server 5500 --bind 0.0.0.0`) — and you **must** derive the API base from the page
+(see constraint 3), never hardcode `http://localhost:8787`.
 
-You can also drop the files into the API's `public/` folder and serve them from
-`http://localhost:8787/` directly. Either is fine. **Do not** open the HTML via `file://` —
-`fetch`/XHR to the API and media playback both require an `http(s)` origin.
+Either way, **do not** open the HTML via `file://` — `fetch`/XHR to the API and media playback both
+require an `http(s)` origin.
 
 ---
 
@@ -68,9 +79,14 @@ These are the things that will silently break the site if ignored.
 2. **Always play through the proxied URL**, never the raw provider URL. If a returned stream URL
    starts with `http://localhost:8787/`, use it verbatim. The API is the thing that makes
    cross-origin provider links work.
-3. **Call the API on the exact same host the browser used.** The API builds proxy URLs from the
-   request's `Host` header. If the page is on `localhost`, call `http://localhost:8787`; if on
-   `127.0.0.1`, call `http://127.0.0.1:8787`. Mixing them is a common cause of dead streams.
+3. **Never hardcode the API host — derive it from the page.** The API builds proxy URLs from the
+   request's `Host` header, so the page must call the API back on the *same* host it was served
+   from. Best of all, use **relative URLs** (`/api/...`) if you serve the site from the API's
+   `public/` folder. If you must build an absolute base, do:
+   `` const API = `${location.protocol}//${location.hostname}:8787`; `` — **not**
+   `http://localhost:8787`. A hardcoded `localhost` means the site loads on your Mac but breaks on
+   a phone (it would point the phone at *itself*). Mixing `localhost` and `127.0.0.1` is a classic
+   cause of dead streams.
 4. **HLS `.m3u8` URLs must NOT be given directly to `<video src>`** except on Safari (which has
    native HLS). Use hls.js for Chrome/Firefox/Edge. Feature-detect: use native HLS if
    `video.canPlayType('application/vnd.apple.mpegurl')` is truthy, else hls.js.

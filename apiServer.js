@@ -1110,10 +1110,31 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
 
 const PORT = config.port;
 const HOST = process.env.BIND_HOST || '0.0.0.0';
+
+// Every non-loopback IPv4 address this machine owns, so the banner can print a URL that works
+// from a phone or another computer on the same Wi-Fi. This replaces a hardcoded address that was
+// only ever right for one developer's network and broke the moment the router re-leased a
+// different IP or the server moved to another machine. Binding 0.0.0.0 (the default) serves all
+// of them; binding 127.0.0.1 serves only this computer.
+function lanAddresses() {
+  const os = require('os');
+  const out = [];
+  for (const [iface, addrs] of Object.entries(os.networkInterfaces() || {})) {
+    for (const a of addrs || []) if (a.family === 'IPv4' && !a.internal) out.push({ iface, address: a.address });
+  }
+  return out;
+}
+
 const server = app.listen(PORT, HOST, () => {
-  console.log(`TMDB Embed REST API listening on http://${HOST}:${PORT}`);
-  if (HOST !== '192.168.86.75') {
-    console.log(`Local access (if running on your machine): http://192.168.86.75:${PORT}`);
+  console.log(`TMDB Embed REST API listening on ${HOST}:${PORT}`);
+  console.log(`  this machine:   http://localhost:${PORT}`);
+  const lan = lanAddresses();
+  for (const { iface, address } of lan) {
+    console.log(`  Wi-Fi / LAN:    http://${address}:${PORT}   (${iface})`);
+  }
+  if (!lan.length) console.log('  Wi-Fi / LAN:    (no non-loopback IPv4 yet -- join Wi-Fi to reach this from another device)');
+  if (HOST === '127.0.0.1' || HOST === 'localhost') {
+    console.warn(`[startup][warning] BIND_HOST=${HOST} is loopback-only: OTHER DEVICES ON YOUR WI-FI CANNOT CONNECT. Unset BIND_HOST (defaults to 0.0.0.0) to serve the local network.`);
   }
   console.log('Endpoints:');
   console.log('  GET  /api/health');

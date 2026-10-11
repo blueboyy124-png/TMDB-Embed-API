@@ -88,6 +88,15 @@ try {
   for (const k of UI) if (s[k] != null) $(k).value = s[k];
   for (const k of CB) if (s[k] != null) $(k).checked = s[k];
 } catch {}
+// Default the API to the host this page was served from, so the same page works from a phone or
+// another computer on the Wi-Fi. A leftover loopback value is replaced whenever the page itself
+// is not being viewed from loopback (otherwise the other device would point the API at itself).
+{
+  const saved = ($('#base').value || '').trim();
+  const savedIsLoopback = /^https?:\/\/(localhost|127\.0\.0\.1)(?::|\/|$)/i.test(saved);
+  const viewingFromLoopback = ['localhost', '127.0.0.1'].includes(location.hostname);
+  if (!saved || (savedIsLoopback && !viewingFromLoopback)) $('#base').value = location.origin;
+}
 const saveUI = () => { const s = {}; for (const k of UI) s[k] = $(k).value; for (const k of CB) s[k] = $(k).checked; try { localStorage.setItem('sr.ui', JSON.stringify(s)); } catch {} };
 document.addEventListener('input', saveUI); document.addEventListener('change', saveUI);
 let hls = null, runId = 0, cur = null, runAC = null, retry = 0;

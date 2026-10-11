@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <title>MacStream</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23000'/%3E%3Cpath d='M12 9v14l11-7z' fill='%23fff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#view">Skip to content</a>
+
+  <header id="nav" class="nav">
+    <a class="brand" href="#/" aria-label="MacStream home">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12.5 9.5v13l10-6.5z" fill="currentColor"/></svg>
+      <span class="brand-word">MacStream</span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#/" data-nav="home"><span data-icon="home"></span><span>Home</span></a>
+      <a href="#/browse/movie" data-nav="movie"><span data-icon="film"></span><span>Movies</span></a>
+      <a href="#/browse/series" data-nav="series"><span data-icon="tv"></span><span>Series</span></a>
+    </nav>
+    <div class="nav-right">
+      <form id="searchForm" class="search" role="search" autocomplete="off">
+        <button type="button" id="searchToggle" class="icon-btn" aria-label="Search" aria-expanded="false"><span data-icon="search"></span></button>
+        <input id="searchInput" type="search" placeholder="Search movies and series" aria-label="Search movies and series" spellcheck="false">
+      </form>
+      <button id="shortcutsBtn" class="icon-btn hide-mobile" aria-label="Keyboard shortcuts"><span data-icon="keyboard"></span></button>
+      <span id="statusDot" class="status-dot" role="status" aria-label="Checking server" title="Checking server…"></span>
+    </div>
+  </header>
+
+  <div id="offline" class="offline" role="alert" hidden>
+    <span data-icon="alert"></span>
+    <span>Can't reach the MacStream API at <code id="offlineHost"></code>. Start it with <code>npm start</code> and this page will reconnect on its own.</span>
+    <button id="offlineRetry" class="btn btn-sm btn-ghost">Retry now</button>
+  </div>
+
+  <main id="view" tabindex="-1" aria-live="polite"></main>
+
+  <!-- ============ PLAYER ============ -->
+  <section id="player" class="player" hidden data-mode="full" data-controls="visible" aria-label="Video player">
+    <video id="video" playsinline preload="auto"></video>
+
+    <div class="p-scrim p-scrim-top"></div>
+    <div class="p-scrim p-scrim-bottom"></div>
+
+    <div class="p-top">
+      <button id="pBack" class="icon-btn lg" aria-label="Minimise player (Esc)"><span data-icon="chevDown"></span></button>
+      <div class="p-title">
+        <h2 id="pTitle"></h2>
+        <p id="pSub"></p>
+      </div>
+      <button id="pClose" class="icon-btn lg" aria-label="Stop playback and close"><span data-icon="close"></span></button>
+    </div>
+
+    <div class="p-center">
+      <div id="pSpinner" class="spinner" role="status" aria-label="Loading video" hidden></div>
+      <button id="pBigPlay" class="big-play" aria-label="Play" hidden><span data-icon="play"></span></button>
+      <p id="pStatus" class="p-status" hidden></p>
+    </div>
+
+    <div class="p-bottom">
+      <div class="timeline-row">
+        <span id="tCur" class="time">0:00</span>
+        <div id="timeline" class="timeline" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="tl-track">
+            <div id="tlBuf" class="tl-buf"></div>
+            <div id="tlFill" class="tl-fill"></div>
+            <div id="tlThumb" class="tl-thumb"></div>
+          </div>
+          <div id="tlTip" class="tl-tip" hidden>0:00</div>
+        </div>
+        <span id="tRem" class="time">-0:00</span>
+      </div>
+
+      <div class="controls">
+        <div class="ctl-left">
+          <button id="cMute" class="icon-btn" aria-label="Mute (m)"><span data-icon="volume"></span></button>
+          <input id="cVol" class="vol" type="range" min="0" max="1" step="0.02" value="1" aria-label="Volume">
+        </div>
+        <div class="ctl-center">
+          <button id="cBack" class="icon-btn lg" aria-label="Back 10 seconds"><span data-icon="rew10"></span></button>
+          <button id="cPlay" class="icon-btn xl" aria-label="Play / pause (space)"><span data-icon="pause"></span></button>
+          <button id="cFwd" class="icon-btn lg" aria-label="Forward 10 seconds"><span data-icon="fwd10"></span></button>
+        </div>
+        <div class="ctl-right">
+          <button id="cNext" class="btn btn-sm btn-ghost" hidden aria-label="Next episode"><span data-icon="next"></span><span>Next</span></button>
+          <button id="cStreams" class="btn btn-sm btn-ghost streams-btn" aria-haspopup="dialog" aria-controls="drawer"><span data-icon="layers"></span><span>Streams</span></button>
+          <button id="cMini" class="icon-btn" aria-label="Mini player (Esc)"><span data-icon="mini"></span></button>
+          <button id="cFull" class="icon-btn" aria-label="Fullscreen (f)"><span data-icon="expand"></span></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- mini-player chrome -->
+    <div class="mini-ui">
+      <button id="mExpand" class="mini-hit" aria-label="Expand player"></button>
+      <button id="mPlay" class="icon-btn" aria-label="Play / pause"><span data-icon="pause"></span></button>
+      <button id="mClose" class="icon-btn" aria-label="Stop and close mini player"><span data-icon="close"></span></button>
+      <div class="mini-title" id="mTitle"></div>
+      <div class="mini-bar"><div id="mFill"></div></div>
+    </div>
+
+    <!-- stall offer (never auto-switches) -->
+    <div id="stall" class="card-pop stall" role="alertdialog" aria-labelledby="stallTitle" hidden>
+      <div class="pop-icon"><span data-icon="alert"></span></div>
+      <div class="pop-body">
+        <strong id="stallTitle">Playback looks stuck</strong>
+        <span>Try another stream? We won't switch unless you ask.</span>
+      </div>
+      <div class="pop-actions">
+        <button id="stallSwitch" class="btn btn-sm btn-light">Switch</button>
+        <button id="stallDismiss" class="btn btn-sm btn-ghost">Dismiss</button>
+      </div>
+    </div>
+
+    <!-- up next -->
+    <div id="upnext" class="card-pop upnext" hidden>
+      <img id="unStill" alt="" loading="lazy">
+      <div class="pop-body">
+        <small id="unKicker">Up next</small>
+        <strong id="unTitle"></strong>
+        <label class="switch"><input id="unAuto" type="checkbox"><span></span> Auto-play next</label>
+      </div>
+      <div class="pop-actions">
+        <button id="unPlay" class="btn btn-sm btn-light"><span data-icon="play"></span><span id="unPlayLabel">Play now</span></button>
+        <button id="unCancel" class="btn btn-sm btn-ghost">Not now</button>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+
+    <!-- streams drawer -->
+    <aside id="drawer" class="drawer" role="dialog" aria-label="Streams" aria-hidden="true">
+      <div class="drawer-head">
+        <div>
+          <h3>Streams</h3>
+          <p id="drawerSub">Loading sources…</p>
+        </div>
+        <button id="drawerClose" class="icon-btn" aria-label="Close streams"><span data-icon="close"></span></button>
+      </div>
+      <p class="drawer-note" id="drawerNote">Sorted by quality, playable rows first. The best playable row is picked automatically.</p>
+      <ul id="drawerList" class="stream-list"></ul>
+      <div class="drawer-foot">
+        <button id="drawerMore" class="btn btn-sm btn-ghost" hidden>Wait for slower providers</button>
+      </div>
+    </aside>
+  </section>
+
+  <!-- shortcuts -->
+  <div id="shortcuts" class="modal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" hidden>
+    <div class="modal-card">
+      <h3>Keyboard shortcuts</h3>
+      <dl>
+        <div><dt><kbd>Space</kbd></dt><dd>Play / pause</dd></div>
+        <div><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Seek 10 seconds</dd></div>
+        <div><dt><kbd>f</kbd></dt><dd>Fullscreen</dd></div>
+        <div><dt><kbd>m</kbd></dt><dd>Mute</dd></div>
+        <div><dt><kbd>Esc</kbd></dt><dd>Dismiss offer → mini-player → stop &amp; save</dd></div>
+        <div><dt><kbd>/</kbd></dt><dd>Search</dd></div>
+        <div><dt><kbd>?</kbd></dt><dd>This panel</dd></div>
+      </dl>
+      <button id="shortcutsClose" class="btn btn-light">Close</button>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+  <script src="player.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>`
