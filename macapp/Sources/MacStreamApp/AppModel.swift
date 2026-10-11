@@ -507,55 +507,110 @@ final class AppModel: ObservableObject {
     /// (Febbox/shegu answers 403 across the board some days), that is an endless spinner on
     /// row 1 while live rows sit unused below it. This probes the top candidates through the
     /// exact URLs mpv will use and returns the first that actually answers. Probes are tiny
-    /// (Range headers, ≤1KB) and run in parallel; if every probe fails the row list is tried
-    /// blind anyway, because a probe can lie but the player cannot.
+    /// (Range headers, ≤256KB measured) and run in parallel; if every probe fails the row
+    /// list is tried blind anyway, because a probe can lie but the player cannot.
+    ///
+    /// Alive is not enough, though: "answers" and "can sustain the movie" are different
+    /// questions, and picking the first answerer is how playback landed on CDNs trickling
+    /// 0.5 MB/s past a 10 MB/s row sitting three places down — video that crawls at 5% of
+    /// real time behind a permanent spinner. Probes therefore MEASURE throughput (bounded:
+    /// 256KB or 2.5s, whichever first) and the fastest alive row plays. Positional order
+    /// still wins ties, and HLS rows (whose segment throughput a header probe can't see)
+    /// keep their position among themselves.
     func preflight(_ rows: [Stream]) async -> Stream {
         let candidates = Array(rows.prefix(10))
         guard candidates.count > 1, candidates.first?.url != nil else { return rows[0] }
-        let results = await withTaskGroup(of: (Int, Bool).self) { group -> [(Int, Bool)] in
+        let results = await withTaskGroup(of: (Int, ProbeResult).self) { group -> [(Int, ProbeResult)] in
             for (i, row) in candidates.enumerated() {
                 group.addTask { (i, await self.probeRow(row)) }
             }
-            var out: [(Int, Bool)] = []
+            var out: [(Int, ProbeResult)] = []
             for await r in group { out.append(r) }
             return out
         }
-        let alive = results.filter { $0.1 }.map { $0.0 }.sorted()
-        if let best = alive.first {
-            if best > 0 {
-                MPVController.log("preflight: row \(best + 1) is the first live row (\(alive.count)/\(candidates.count) probed alive)")
+        let alive = results.filter { $0.1.alive }.sorted { $0.0 < $1.0 }
+        guard let best = alive.max(by: { a, b in
+            // "a is worse than b": measured beats unmeasured; among measured, faster wins
+            // unless within 20% (then position wins); among unmeasured, position wins.
+            // The stall watch is the safety net when every row measures slow.
+            switch (a.1.mbps, b.1.mbps) {
+            case let (am?, bm?):
+                if am == 0 || bm == 0 { return a.0 > b.0 }
+                if abs(am - bm) / max(am, bm) < 0.2 { return a.0 > b.0 }
+                return am < bm
+            case (_?, nil): return false
+            case (nil, _?): return true
+            case (nil, nil): return a.0 > b.0
             }
-            return candidates[best]
+        }) else {
+            MPVController.log("preflight: no live rows in the top \(candidates.count) — trying row 1 blind")
+            return rows[0]
         }
-        MPVController.log("preflight: no live rows in the top \(candidates.count) — trying row 1 blind")
-        return rows[0]
+        if best.0 > 0 || best.1.mbps != nil {
+            let speed = best.1.mbps.map { String(format: ", %.2f MB/s", $0 / 1e6) } ?? ""
+            MPVController.log("preflight: row \(best.0 + 1) selected (\(alive.count)/\(candidates.count) probed alive\(speed))")
+        }
+        return candidates[best.0]
     }
+
+    struct ProbeResult { var alive: Bool; var mbps: Double? }
 
     /// True when the row's URL answers 2xx with something plausibly playable (playlists must
     /// actually look like a playlist — the m3u8-proxy answers dead links with a JSON error).
-    private func probeRow(_ row: Stream) async -> Bool {
-        guard let url = URL(string: row.url) else { return false }
+    /// Media rows get a short throughput measurement so preflight can prefer a row the
+    /// connection can actually sustain.
+    ///
+    /// nonisolated on purpose: this iterates network bytes, and on the main actor ten
+    /// parallel probes queue behind each other (and behind SwiftUI's first render and mpv
+    /// init) until the 5s request timeout trips — every row probes "dead" on exactly the
+    /// slow-CDN days the measurement exists for.
+    nonisolated private func probeRow(_ row: Stream) async -> ProbeResult {
+        guard let url = URL(string: row.url) else { return ProbeResult(alive: false, mbps: nil) }
         var req = URLRequest(url: url)
-        req.timeoutInterval = 5
+        // Idle-based, and deliberately above the proxy's attempt ladder (5s pooled attempt +
+        // fresh-socket retry ≈ 6s worst typical TTFB on origins that blackhole idle sockets).
+        // A 5s probe marked exactly those rows dead — preflight declared "no live rows" for a
+        // set the proxy would have answered moments later.
+        req.timeoutInterval = 10
         req.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
         do {
             let (bytes, response) = try await URLSession.shared.bytes(for: req)
             defer { bytes.task.cancel() }
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                return false
+                return ProbeResult(alive: false, mbps: nil)
             }
             let isPlaylist = row.url.lowercased().contains(".m3u8")
                 || response.mimeType?.range(of: "mpegurl", options: .caseInsensitive) != nil
-            guard isPlaylist else { return true }   // media: the status is enough; cancel via defer
-            var head = ""
-            for try await line in bytes.lines {
-                head += line + "\n"
-                if head.contains("#EXTM3U") { return true }
-                if head.count > 512 { return false }
+            if isPlaylist {
+                var head = ""
+                for try await line in bytes.lines {
+                    head += line + "\n"
+                    if head.contains("#EXTM3U") { return ProbeResult(alive: true, mbps: nil) }
+                    if head.count > 512 { return ProbeResult(alive: false, mbps: nil) }
+                }
+                return ProbeResult(alive: false, mbps: nil)
             }
-            return false
+            // Media: read for up to 2s / 128KB and measure. The budget is deliberately small —
+            // probes run in parallel, and on a link delivering 0.5 MB/s ten 256KB probes
+            // starve each other into false "dead" verdicts. 128KB still separates a
+            // 10 MB/s row from a 100 KB/s crawl, which is all ranking needs. Some CDNs
+            // answer 200 to a ranged request and stream the whole file — the deadline
+            // bounds those too.
+            let capNs: UInt64 = 2_000_000_000
+            let start = DispatchTime.now().uptimeNanoseconds
+            var read = 0
+            for try await _ in bytes {
+                read += 1
+                if read >= 128 * 1024 { break }
+                if DispatchTime.now().uptimeNanoseconds &- start > capNs { break }
+            }
+            let secs = max(Double(DispatchTime.now().uptimeNanoseconds &- start) / 1e9, 0.001)
+            // Any body bytes at all yield a rate; a 2xx that never sends one is alive-but-unmeasured.
+            let mbps = read > 0 ? Double(read) / secs : nil
+            return ProbeResult(alive: true, mbps: mbps)
         } catch {
-            return false
+            MPVController.log("probe DEBUG failed for \(row.url.prefix(60)): \(type(of: error)) \(error)")
+            return ProbeResult(alive: false, mbps: nil)
         }
     }
 

@@ -94,10 +94,13 @@ final class PlaybackController: ObservableObject {
 
     private let store: ContinueStore
     private var poll: Timer?
-    private var lastPos = -1.0
-    private var lastMove = Date()
     private var didFirstFrame = false
     private var stallDismissed = false
+    /// Trailing playback-progress window for the stall watch: (sample time, mpv position,
+    /// mpv cache speed). The stall decision is a rate over this window, not a single reading —
+    /// see the stall watch in tick().
+    private var crawlSamples: [(t: Date, pos: Double, cache: Double)] = []
+    private let crawlWindow: TimeInterval = 20
     /// Spinner hysteresis: when the current want-to-buffer / recovered streak began.
     private var bufferingSince: Date?
     private var bufferingClearSince: Date?
@@ -153,8 +156,7 @@ final class PlaybackController: ObservableObject {
         didFirstFrame = false
         stallOffer = nil
         stallDismissed = false
-        lastPos = -1
-        lastMove = Date()
+        crawlSamples.removeAll()
         rowLoadStarted = Date()
         startMisses = 0
         buffering = false
@@ -205,7 +207,7 @@ final class PlaybackController: ObservableObject {
         stallOffer = nil
         startMisses = 0
         notice = nil
-        lastPos = -1
+        crawlSamples.removeAll()
         lastStart = nil
         bufferingSince = nil
         bufferingClearSince = nil
@@ -235,9 +237,9 @@ final class PlaybackController: ObservableObject {
 
     func seek(by seconds: Double) {
         player?.seekBy(seconds)
-        // The poll would otherwise report the pre-seek position for up to 0.5s and the stall
-        // watcher could see "no movement" right after a jump.
-        lastMove = Date()
+        // A jump re-bases position, so the pre-seek window would read as a wild rate jump.
+        // Fresh measurements start from the new spot.
+        crawlSamples.removeAll()
     }
 
     func setVolume(_ v: Double) {
@@ -268,8 +270,7 @@ final class PlaybackController: ObservableObject {
         didFirstFrame = false
         stallOffer = nil
         stallDismissed = false
-        lastPos = -1
-        lastMove = Date()
+        crawlSamples.removeAll()
         rowLoadStarted = Date()
         bufferingSince = nil
         bufferingClearSince = nil
@@ -429,34 +430,47 @@ final class PlaybackController: ObservableObject {
                     showStreams = true
                 }
             }
-            // Stall watch: picture started but no progress for 15s while meant to be playing
-            // means the source stopped sending usable data. Never-started rows are the
-            // watchdog's job above, not this banner's.
-            if pos != lastPos {
-                lastPos = pos
-                lastMove = Date()
-                stallOffer = nil          // recovered on its own
-                stallDismissed = false
-            } else if coreIdle, isPlaying, cacheSpeed >= 4096 {
-                // A cache-fill that is still pulling bytes is not a stall: a slow 4K
-                // start (or a mid-file dip the wider cache is riding out) can sit still
-                // past 15s while the buffer builds — the spinner covers that, and firing
-                // the banner there was the false-offer bug. Wire progress keeps the clock
-                // fresh and retracts an offer if the source comes back; a dead source
-                // reads 0 B/s here and the banner fires exactly as before.
-                lastMove = Date()
-                if stallOffer != nil {
+            // Stall watch, rate-based. Both shapes of a broken stream look identical to the
+            // viewer — the picture stops, or it advances so slowly the spinner owns the
+            // screen — and the old movement-based check left them stranded in the second
+            // case: a crawling row inches pos forward every tick, so "did pos move?" kept
+            // answering "yes, recovering" while the movie played at 6% of real time with
+            // no offer to switch. One measurement now decides both shapes: how much movie
+            // did the trailing window actually buy?
+            //
+            //   - < 0.35× real-time over the window while meant to be playing -> offer
+            //     (NEVER auto-switch; switching rows is the user's call)
+            //   - recovered to >= 0.8×, or the cache is refilling fast (>= 3 MB/s) -> retract
+            //   - bytes still pouring in fast (>= 2 MB/s avg) are never offered against:
+            //     that is a buffer building, and the spinner covers it (the Phase-2
+            //     false-offer bug this replaces — "wire progress means wait, not switch")
+            //
+            // A dismissed banner stays dismissed while the row keeps crawling; only a real
+            // recovery (>= 0.8×), a pause, or a row switch arms it again. Never-started
+            // rows are the watchdog's job above, not this banner's.
+            if didFirstFrame, isPlaying, rowIndex != nil {
+                let now = Date()
+                let window = crawlWindow
+                crawlSamples.append((now, pos, Double(cacheSpeed)))
+                crawlSamples.removeAll { now.timeIntervalSince($0.t) > window }
+            } else {
+                crawlSamples.removeAll()   // paused / not painting: no window to judge
+            }
+            if let first = crawlSamples.first, let last = crawlSamples.last,
+               last.t.timeIntervalSince(first.t) >= 10 {
+                let span = last.t.timeIntervalSince(first.t)
+                let rate = max(0, last.pos - first.pos) / span
+                let avgCache = crawlSamples.reduce(0.0) { $0 + $1.cache } / Double(crawlSamples.count)
+                let atEnd = dur > 0 && last.pos >= dur - 0.5   // finished is not a stall
+                if rate < 0.35, avgCache < 2_000_000, !atEnd {
+                    if stallOffer == nil && !stallDismissed {
+                        stallOffer = StallOffer(canSwitch: rows.count > 1)
+                        MPVController.log("STALL detected at pos=\(pos) (rows=\(rows.count), in=\(cacheSpeed) B/s) — playing at \(String(format: "%.2f", rate))× real-time over \(Int(span))s")
+                    }
+                } else if (rate >= 0.8 || avgCache >= 3_000_000), stallOffer != nil {
                     stallOffer = nil
                     stallDismissed = false
-                    MPVController.log("stall retracted: source resumed at \(cacheSpeed) B/s")
-                }
-            } else if didFirstFrame && isPlaying && Date().timeIntervalSince(lastMove) > 15 {
-                // End of file is not a stall: pos parked at the duration means the video
-                // FINISHED, and offering "switch to the next row" there would be nonsense.
-                let atEnd = dur > 0 && pos >= dur - 0.5
-                if stallOffer == nil && !stallDismissed && !atEnd {
-                    stallOffer = StallOffer(canSwitch: rows.count > 1)
-                    MPVController.log("STALL detected at pos=\(pos) (rows=\(rows.count), in=\(cacheSpeed) B/s)")
+                    MPVController.log("stall retracted: recovered to \(String(format: "%.2f", rate))× (cache \(Int(avgCache)) B/s)")
                 }
             }
             // Continue Watching: on stop via flushProgress(), plus every 10s while playing —

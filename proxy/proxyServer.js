@@ -20,18 +20,67 @@ const https = require('https');
 // forever. DISABLE_KEEPALIVE=true restores the old per-request behaviour.
 const KEEPALIVE = process.env.DISABLE_KEEPALIVE !== 'true';
 const MAX_SOCKETS = Number(process.env.PROXY_MAX_SOCKETS) || 64;
-const FREE_SOCKET_TIMEOUT_MS = 15000;
-// NOTE: deliberately NO `timeout` here. An http.Agent's `timeout` only *emits* a 'timeout' event on the
-// socket; it does not abort the request, and with nothing listening the request hangs indefinitely instead of
-// failing. Setting it made every proxied fetch hang -- measured: the same manifest took 725ms direct and never
-// returned through the proxy. `freeSocketTimeout` is the safe variant: it only reaps sockets sitting IDLE in
-// the pool. Per-request timeouts already exist (node-fetch `timeout` at the call sites, and the aggregate's
-// own soft deadline), so the agent does not need one.
+// Short on purpose. Some origins (googleusercontent above all) close idle connections after a
+// few seconds — sometimes the FIN is lost on this network, leaving a half-dead socket the pool
+// still believes is alive. The next request that reuses it gets no response at all until the
+// header timeout kills it: measured as a 16s time-to-first-byte where a fresh socket answered
+// in ~1.3s. Reaping free sockets at 5s shrinks that poisoned window from ~15s to ~nothing;
+// reuse for back-to-back segment requests (the case keep-alive exists for) still works.
+const FREE_SOCKET_TIMEOUT_MS = 5000;
+// NOTE: deliberately NO `timeout` on the agents. An http.Agent's `timeout` only *emits* a
+// 'timeout' event; with nothing listening the request hangs indefinitely instead of failing.
+// Deadlines live per-request in `upstreamFetch` below, where they can actually abort.
 const agentOptions = { keepAlive: KEEPALIVE, maxSockets: MAX_SOCKETS, maxFreeSockets: 16, freeSocketTimeout: FREE_SOCKET_TIMEOUT_MS };
 const httpAgent = new http.Agent(agentOptions);
 const httpsAgent = new https.Agent(agentOptions);
 // node-fetch reads the agent per-request, so it is threaded through explicitly at each call site.
 const agentFor = url => (String(url).startsWith('http://') ? httpAgent : httpsAgent);
+// Last-resort agent for the player-facing retry: brand-new socket per request, so a wedged
+// pooled connection can never be the reason the retry fails too.
+const freshAgentFor = url => (String(url).startsWith('http://')
+    ? new http.Agent({ keepAlive: false })
+    : new https.Agent({ keepAlive: false }));
+
+// Upstream fetch hygiene. All three guards exist because a single hung or leaked upstream
+// request used to freeze video playback indefinitely (mpv waits on the proxy; the proxy waited
+// on an upstream socket that would never answer):
+//
+//   1. Client aborts are fatal to the upstream request. mpv aborts constantly -- seeks, stall
+//      recovery, row switches, quitting the app. Before this, an abort left the upstream
+//      download running with its socket checked out of the pool forever; leaked far enough and
+//      new requests to that origin stalled behind the wedged state until a server restart.
+//   2. The header phase gets a hard deadline. A hung upstream (or a half-dead keep-alive
+//      socket being reused) becomes an error in seconds instead of a forever-spinner.
+//   3. The deadline clears the moment headers arrive, so long-running video streams are never
+//      killed by it; mid-stream stalls are handled separately by the body-idle watchdog below.
+const UPSTREAM_HEADER_TIMEOUT_MS = 15000;
+// The player-facing routes try twice with different budgets. Attempt 1 usually lands on a
+// pooled socket and must fail fast — this network loses the FIN on origin-closed idle
+// connections, and a blackholed reuse would otherwise park the player for the full header
+// deadline (measured: 16s where a fresh socket answered in ~1.3s). Attempt 2 runs on a
+// fresh, non-pooled socket and gets the full budget.
+const UPSTREAM_FAST_RETRY_MS = 5000;
+const UPSTREAM_RETRY_TIMEOUT_MS = 10000;
+// Best-effort accelerators (HEAD size preflight, 0-0 probe, tail warm-up) get a short leash:
+// a healthy origin answers headers in ~1s, and stacking full-length deadlines on a dead host
+// made the total failure time four phases long. These only make startup snappier -- if they
+// time out, the main fetch still runs.
+const UPSTREAM_ACCEL_TIMEOUT_MS = 6000;
+const UPSTREAM_BODY_IDLE_TIMEOUT_MS = 25000; // no bytes from upstream for this long -> cut the client
+
+function upstreamFetch(url, opts = {}, { res = null, timeoutMs = UPSTREAM_HEADER_TIMEOUT_MS, agent = null } = {}) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error('upstream header timeout')), timeoutMs);
+    let detach = () => {};
+    if (res) {
+        // Client went away (abort, seek, quit): take the upstream down with it.
+        const onClose = () => ac.abort(new Error('client closed'));
+        res.on('close', onClose);
+        detach = () => res.removeListener('close', onClose);
+    }
+    return fetch(url, { ...opts, agent: agent || agentFor(url), signal: ac.signal })
+        .finally(() => { clearTimeout(timer); detach(); });
+}
 
 const CACHE_MAX_SIZE = 2000;
 const CACHE_EXPIRY_MS = 2 * 60 * 60 * 1000; // 2 hours
@@ -111,7 +160,7 @@ async function prefetchSegment(url, headers) {
     if (existing && Date.now() - existing.timestamp <= CACHE_EXPIRY_MS) return;
     try {
         if (prefetchSuppressed()) return;                     // a real request outranks us
-        const resp = await fetch(url, { headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(url) });
+        const resp = await upstreamFetch(url, { headers: { 'User-Agent': DEFAULT_UA, ...headers } });
         if (!resp.ok) return;
         const data = new Uint8Array(await resp.arrayBuffer());
         const responseHeaders = {};
@@ -266,7 +315,14 @@ function createProxyRoutes(app) {
             // Ignore URL parsing errors
         }
         try {
-            const response = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(targetUrl) });
+            let response;
+            try {
+                response = await upstreamFetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } }, { res, timeoutMs: UPSTREAM_FAST_RETRY_MS });
+            } catch (firstErr) {
+                if (res.destroyed || res.headersSent || res.writableEnded) throw firstErr;
+                if (debug) console.log('[m3u8-proxy] upstream attempt failed, retrying fresh:', firstErr.message);
+                response = await upstreamFetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } }, { res, agent: freshAgentFor(targetUrl), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
+            }
             if (!response.ok) return res.status(response.status).json({ error: `M3U8 fetch failed: ${response.status}` });
             const text = await response.text();
             const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
@@ -389,7 +445,7 @@ function createProxyRoutes(app) {
             let upstreamAcceptRanges = null;
             if (!effectiveRange) {
                 try {
-                    const headResp = await fetch(targetUrl, { method: 'HEAD', headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(targetUrl) });
+                    const headResp = await upstreamFetch(targetUrl, { method: 'HEAD', headers: { 'User-Agent': DEFAULT_UA, ...headers } }, { res, timeoutMs: UPSTREAM_ACCEL_TIMEOUT_MS });
                     if (headResp.ok) {
                         contentLength = headResp.headers.get('content-length');
                         upstreamAcceptRanges = headResp.headers.get('accept-ranges');
@@ -405,7 +461,7 @@ function createProxyRoutes(app) {
                 try {
                     const probeRange = 'bytes=0-0';
                     if (debug) console.log('[ts-proxy] probe range');
-                    const probeResp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': probeRange }, agent: agentFor(targetUrl) });
+                    const probeResp = await upstreamFetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': probeRange } }, { res, timeoutMs: UPSTREAM_ACCEL_TIMEOUT_MS });
                     if (probeResp.status === 206) {
                         const cr = probeResp.headers.get('content-range');
                         if (cr) {
@@ -432,7 +488,7 @@ function createProxyRoutes(app) {
                     (async () => {
                         try {
                             if (debug) console.log('[ts-proxy] tail prefetch start', { tailRange });
-                            const tr = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, Range: tailRange }, agent: agentFor(targetUrl) });
+                            const tr = await upstreamFetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, Range: tailRange } }, { timeoutMs: UPSTREAM_ACCEL_TIMEOUT_MS });
                             if (tr.status === 206) {
                                 const buf = Buffer.from(await tr.arrayBuffer());
                                 const cr = tr.headers.get('content-range');
@@ -460,7 +516,7 @@ function createProxyRoutes(app) {
                 const desired = initChunkKB * 1024;
                 const chunkSize = Math.min(desired, Math.max(0, total - 1));
                 const syntheticRange = `bytes=0-${chunkSize}`;
-                const resp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': syntheticRange }, agent: agentFor(targetUrl) });
+                const resp = await upstreamFetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers, 'Range': syntheticRange } }, { res });
                 if (resp.status === 206) {
                     if (debug) console.log('[ts-proxy] synthetic 206', syntheticRange);
                     const upstreamCT = inferContentType(resp.headers.get('content-type'), targetUrl);
@@ -478,10 +534,21 @@ function createProxyRoutes(app) {
                 // If server ignored range (e.g., returned 200), fall through to normal logic below.
             }
 
-            const upstreamOptions = { headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(targetUrl) };
+            const upstreamOptions = { headers: { 'User-Agent': DEFAULT_UA, ...headers } };
             // If client supplied a suffix range like bytes=0- we pass it; force200 strips Range
             if (force200 && headers.Range) delete headers.Range;
-            const resp = await fetch(targetUrl, upstreamOptions);
+            // One retry on a brand-new connection. The first attempt uses the shared keep-alive
+            // pool; if it dies (dead pooled socket, reset, header timeout), the client -- an
+            // already-waiting video player -- gets a second attempt on a socket nothing else has
+            // touched before we give up and return an error.
+            let resp;
+            try {
+                resp = await upstreamFetch(targetUrl, upstreamOptions, { res, timeoutMs: UPSTREAM_FAST_RETRY_MS });
+            } catch (firstErr) {
+                if (res.destroyed || res.headersSent || res.writableEnded) throw firstErr;
+                if (debug) console.log('[ts-proxy] upstream attempt failed, retrying fresh:', firstErr.message);
+                resp = await upstreamFetch(targetUrl, upstreamOptions, { res, agent: freshAgentFor(targetUrl), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
+            }
             if (!resp.ok && resp.status !== 206) {
                 if (debug) console.log('[ts-proxy] upstream error', resp.status);
                 return res.status(resp.status).json({ error: `TS fetch failed: ${resp.status}` });
@@ -521,8 +588,33 @@ function createProxyRoutes(app) {
             res.setHeader('Cache-Control', 'public, max-age=3600');
             res.setHeader('Access-Control-Allow-Origin', '*');
             if (debug) console.log('[ts-proxy] streaming body', { status: resp.status, ct: upstreamCT, cl, contentRange: force200 ? undefined : contentRange });
+            // Tie the upstream download to the client for the life of the stream, not just the
+            // header phase. An abandoned stream (mpv seek, stall recovery, app quit) used to leave
+            // the upstream fetch running with its socket checked out of the pool forever; leaked
+            // far enough, new requests to that origin stalled behind the wreckage until a restart.
+            let idleTimer = null;
+            const bumpIdle = () => {
+                if (idleTimer) clearTimeout(idleTimer);
+                idleTimer = setTimeout(() => {
+                    if (debug) console.log('[ts-proxy] upstream idle mid-stream, cutting client');
+                    try { resp.body.destroy(); } catch (_e) { /* ignore */ }
+                    res.destroy();
+                }, UPSTREAM_BODY_IDLE_TIMEOUT_MS);
+            };
+            res.on('close', () => { if (idleTimer) clearTimeout(idleTimer); try { resp.body.destroy(); } catch (_e) { /* ignore */ } });
+            resp.body.on('error', (err) => {
+                if (debug) console.log('[ts-proxy] upstream body error', err.message);
+                if (idleTimer) clearTimeout(idleTimer);
+                try { res.destroy(); } catch (_e) { /* ignore */ }
+            });
+            resp.body.on('data', bumpIdle);
+            bumpIdle();
             resp.body.pipe(res);
-        } catch (e) { if (debug) console.log('[ts-proxy] exception', e.message); res.status(500).json({ error: e.message }); }
+        } catch (e) {
+            if (debug) console.log('[ts-proxy] exception', e.message);
+            if (!res.headersSent) res.status(500).json({ error: e.message });
+            else try { res.destroy(); } catch (_e) { /* ignore */ }
+        }
     });
 
     // subtitle proxy
@@ -532,13 +624,18 @@ function createProxyRoutes(app) {
             // Ignore URL parsing errors
         }
         try {
-            const resp = await fetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers }, agent: agentFor(targetUrl) });
+            const resp = await upstreamFetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } }, { res });
             if (!resp.ok) return res.status(resp.status).json({ error: `subtitle fetch failed: ${resp.status}` });
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Cache-Control', 'public, max-age=3600');
             res.setHeader('Content-Type', resp.headers.get('content-type') || 'text/vtt');
+            res.on('close', () => { try { resp.body.destroy(); } catch (_e) { /* ignore */ } });
+            resp.body.on('error', () => { try { res.destroy(); } catch (_e) { /* ignore */ } });
             resp.body.pipe(res);
-        } catch (e) { res.status(500).json({ error: e.message }); }
+        } catch (e) {
+            if (!res.headersSent) res.status(500).json({ error: e.message });
+            else try { res.destroy(); } catch (_e) { /* ignore */ }
+        }
     });
 }
 

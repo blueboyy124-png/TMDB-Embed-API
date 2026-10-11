@@ -1,3 +1,9 @@
+// Must be set before the threadpool is first used. The proxy layer does DNS lookups, TLS
+// handshakes, and zlib for every upstream request; the default 4-thread UV pool saturates
+// under a few concurrent streams and every new connection queues behind the backlog -- which
+// presents as "playback freezes forever while curl to the same host is instant".
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '12';
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');

@@ -66,9 +66,12 @@ bug was exactly that: the first rows to arrive were raw, unvalidated, and
 dead at the CDN.
 
 - **Preflight** probes the top 10 rows in parallel through the exact URLs mpv
-  will use (≤1KB Range/playlist-head reads) and auto-play picks the first one
-  that answers. A probe that fails is skipped; if every probe fails the list is
-  still tried in order, because a probe can lie but the player cannot.
+  will use (bounded ≤128KB / 2s reads) and auto-play picks the **fastest** one
+  that answers — "answers" and "can sustain the movie" are different questions,
+  and picking the first answerer kept landing playback on 0.09 MB/s trickles
+  with a 10 MB/s row unused three places down. Near-ties (within 20%) keep
+  positional order. A probe that fails is skipped; if every probe fails the
+  list is still tried in order, because a probe can lie but the player cannot.
 - **The live feed's final `done` event** carries the API's link-checked payload
   (dead links already probed out). Raw `stream` events were only an early
   preview — the app now supersedes them wholesale, and `refreshRows` re-syncs a
@@ -108,13 +111,15 @@ every row stays visible and manually pickable.
   the loading indicator.
 - `demuxer-max-bytes` is 300 MiB (≈1 minute of 4K) with a 20s readahead, so
   a healthy-but-slow CDN refills the buffer instead of starving the decoder.
-- A mid-play freeze raises the stall offer only when the source is actually
-  starved: mpv's `cache-speed` (1s-window bytes/sec) must be under 4 KB/s
-  while cache-idle. A slow-but-flowing source (tested at 30 KB/s end-to-end)
-  never raises the banner — bytes are still arriving, so waiting beats
-  switching — and an offer already on screen retracts when the source recovers
-  before you act on it. Dead sources (`in=0 B/s`) still fire within 15s as
-  before.
+- The stall offer is **rate-based**: a 20s trailing window of position decides.
+  Sustained playback under **0.35× real time** raises the offer — covering both
+  a frozen source and the crawl (a row trickling at 6% of real time behind a
+  permanent spinner used to never fire the old "did pos move?" check, because a
+  crawl always moves a little). The offer retracts at ≥ 0.8× or when the cache
+  refills fast (≥ 3 MB/s — a buffer building, not a stall), and a dismissed
+  banner stays dismissed until a real recovery or a row switch. It is still
+  **offer, never auto-switch**. Tested end-to-end at 30 KB/s (~0.03×): fires
+  during the crawl, switches nothing without you.
 - Playback state (`pos`/`dur`/`buffering`) lives in a nested `PlayerClock`
   observable: the 2×/sec tick updates invalidate only the scrubber and
   spinner, not every view in the window that holds the controller (the
@@ -165,13 +170,12 @@ watching→mini → mini→stop. Shortcuts pass through when ⌘ is held; in min
 they also pass through when a text field, slider, table or button has focus
 (while watching, the hidden browsing UI never swallows player keys).
 
-Stalls **offer, don't auto-switch**: if a started picture freezes for 15s
-mid-play **and the source is actually starved** (mpv `cache-speed` under
-4 KB/s — a slow-but-flowing source just keeps buffering, and an offer
-retracts if the source recovers before you act), a banner asks “Switch to
-next row (⏎) / Dismiss (⎋)”. End of file and paused players never trigger
-it; rows that never start at all are the first-frame watchdog's job (see
-Play determinism above).
+Stalls **offer, don't auto-switch**: if a started picture freezes, or plays
+sustained below 0.35× real time over a 20s window (the unwatchable crawl), a
+banner asks “Switch to next row (⏎) / Dismiss (⎋)”. It retracts when playback
+recovers (≥ 0.8× or a fast cache refill) before you act. End of file and paused
+players never trigger it; rows that never start at all are the first-frame
+watchdog's job (see Play determinism above).
 
 ## Verification hooks
 
@@ -185,7 +189,7 @@ Environment variables for headless test runs (ignored in normal use):
 | `AUTOPLAY_MODE=All` | Fetch via the aggregate live feed instead of the provider-direct route |
 | `POISON_REFUSED=<n>` | Rewrite the first n rows to a closed port (preflight must skip them) |
 | `POISON_EMPTY=<n>` | Next n rows serve a valid but segmentless playlist (watchdog must catch them; run in the default 4khdhub mode) |
-| `POISON_SLOW=<n>` | Next n rows stream from a local server that bursts then trickles (stall-suppression: a flowing source must NOT raise the banner; killing the server must) |
+| `POISON_SLOW=<n>` | Next n rows stream from a local server that bursts then trickles at ~30 KB/s (the unwatchable-crawl case: the rate-based stall watch must raise the offer and must NOT auto-switch) |
 | `OPEN_DETAIL=1` (+ `_TYPE`/`_ID`) | Open the hero page without playing (screenshot hook) |
 | `OPEN_SETTINGS=1` | Open Settings (screenshot hook) |
 | `RESUME_FIRST=1` | Launch into the player via the first Continue Watching item |
