@@ -21,10 +21,10 @@ Implement this in the movies branch of `app.get('/api/streams/:type/:tmdbId', ..
 ## Validation URLs
 After patching, confirm:
 - Movie metadata presence:
-  - `curl -s http://192.168.86.75:8787/api/streams/movie/1083381 | node -e "let j=''+process.stdin.read();"`
+  - `curl -s http://172.21.58.130:8787/api/streams/movie/1083381 | node -e "let j=''+process.stdin.read();"`
   - or simply check in browser/network for existence of `title/overview/poster_path/release_date`.
 - TV episode list (if you later wire it):
-  - `http://192.168.86.75:8787/api/info/tv/:tmdbId/season/:seasonNum`
+  - `http://172.21.58.130:8787/api/info/tv/:tmdbId/season/:seasonNum`
 
 ## Frontend verification
 Once metadata fields exist, `my-anime-site/app/watch/page.tsx` should stop defaulting to:

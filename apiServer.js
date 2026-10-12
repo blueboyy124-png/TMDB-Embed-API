@@ -21,9 +21,23 @@ const { enrichStreams, classifyForPlayback } = require('./utils/streamMeta');
 const { runWithRequestContext } = require('./utils/requestContext');
 const { isEnough, hasVerifiedHighQuality, qualityValue, DEFAULT_ENOUGH_STREAMS, DEFAULT_ENOUGH_PROVIDERS } = require('./utils/earlyExit');
 const linkHealth = require('./utils/linkHealth');
+const { baseUrlFromRequest } = require('./utils/publicUrl');
 
 const app = express();
-app.set('trust proxy', 1);
+
+// Trust the edge that put us here. `1` (trust one hop) is right for a single reverse proxy / platform edge
+// and matches the previous hardcoded value, but it is wrong for a chain of them and unnecessary when the
+// app is exposed directly -- and a wrong value also mis-credits the rate-limit IP and req.protocol. So it
+// is configurable: numbers count hops, `true`/`false` are literal, and anything else (`loopback`, an IP or
+// CIDR) is passed straight to Express. The public-URL helper does not depend on this setting.
+function readTrustProxySetting(value) {
+  if (value === undefined || value === null || value === '') return 1;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  const asNumber = Number(value);
+  return Number.isFinite(asNumber) ? asNumber : value;
+}
+app.set('trust proxy', readTrustProxySetting(process.env.TRUST_PROXY));
 
 // Compress responses. A stream list for a busy episode is ~34KB of JSON, and it is the single most-requested
 // payload here; over a LAN or a phone that is real bandwidth for no benefit, and JSON compresses very well
@@ -849,7 +863,9 @@ async function aggregateStreams(req, res, onEvent) {
     metrics.streamsReturned += streams.length;
 
     if (config.enableProxy) {
-      const serverUrl = `${req.protocol}://${req.get('host')}`;
+      // Reached through whatever public host this request arrived on (a custom domain, a platform edge,
+      // a tunnel), and overridable with PUBLIC_BASE_URL. See utils/publicUrl.js.
+      const serverUrl = baseUrlFromRequest(req);
       streams = processStreamsForProxy(streams, serverUrl);
       // Omit original headers when proxying to avoid leaking upstream requirements
       streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
@@ -1066,7 +1082,7 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     streams = applyFilters(streams, prov.name, config.minQualities, config.excludeCodecs);
     metrics.streamsReturned += streams.length;
     if (config.enableProxy) {
-      const serverUrl = `${req.protocol}://${req.get('host')}`;
+      const serverUrl = baseUrlFromRequest(req);
       streams = processStreamsForProxy(streams, serverUrl);
       streams = streams.map(s => { if (s && typeof s === 'object') { const { headers, ...rest } = s; return rest; } return s; });
     }
@@ -1125,26 +1141,46 @@ function lanAddresses() {
   return out;
 }
 
-const server = app.listen(PORT, HOST, () => {
-  console.log(`TMDB Embed REST API listening on ${HOST}:${PORT}`);
-  console.log(`  this machine:   http://localhost:${PORT}`);
-  const lan = lanAddresses();
-  for (const { iface, address } of lan) {
-    console.log(`  Wi-Fi / LAN:    http://${address}:${PORT}   (${iface})`);
-  }
-  if (!lan.length) console.log('  Wi-Fi / LAN:    (no non-loopback IPv4 yet -- join Wi-Fi to reach this from another device)');
-  if (HOST === '127.0.0.1' || HOST === 'localhost') {
-    console.warn(`[startup][warning] BIND_HOST=${HOST} is loopback-only: OTHER DEVICES ON YOUR WI-FI CANNOT CONNECT. Unset BIND_HOST (defaults to 0.0.0.0) to serve the local network.`);
-  }
-  console.log('Endpoints:');
-  console.log('  GET  /api/health');
-  console.log('  GET  /api/metrics');
-  console.log('  GET  /api/providers');
-  console.log('  GET  /api/streams/:type/:id');
-  console.log('  POST /api/streams/:type/:id');
-  if (!config.febboxCookies || config.febboxCookies.length === 0) {
-    console.warn('[startup][warning] No FEBBOX_COOKIES configured. Showbox / PStream related streams may be unavailable. Set FEBBOX_COOKIES in your environment to enable these sources.');
-  }
-});
+function startServer() {
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`TMDB Embed REST API listening on ${HOST}:${PORT}`);
+    console.log(`  this machine:   http://localhost:${PORT}`);
+    const lan = lanAddresses();
+    for (const { iface, address } of lan) {
+      console.log(`  Wi-Fi / LAN:    http://${address}:${PORT}   (${iface})`);
+    }
+    if (!lan.length) console.log('  Wi-Fi / LAN:    (no non-loopback IPv4 yet -- join Wi-Fi to reach this from another device)');
+    if (HOST === '127.0.0.1' || HOST === 'localhost') {
+      console.warn(`[startup][warning] BIND_HOST=${HOST} is loopback-only: OTHER DEVICES ON YOUR WI-FI CANNOT CONNECT. Unset BIND_HOST (defaults to 0.0.0.0) to serve the local network.`);
+    }
+    if (process.env.PUBLIC_BASE_URL || process.env.PUBLIC_URL || process.env.API_BASE_URL) {
+      console.log(`  public URL:     ${process.env.PUBLIC_BASE_URL || process.env.PUBLIC_URL || process.env.API_BASE_URL}`);
+    } else {
+      console.log('  public URL:     (derived per request from the Host / X-Forwarded-* headers; set PUBLIC_BASE_URL to pin a custom domain)');
+    }
+    console.log('Endpoints:');
+    console.log('  GET  /api/health');
+    console.log('  GET  /api/metrics');
+    console.log('  GET  /api/providers');
+    console.log('  GET  /api/streams/:type/:id');
+    console.log('  POST /api/streams/:type/:id');
+    if (!config.febboxCookies || config.febboxCookies.length === 0) {
+      console.warn('[startup][warning] No FEBBOX_COOKIES configured. Showbox / PStream related streams may be unavailable. Set FEBBOX_COOKIES in your environment to enable these sources.');
+    }
+  });
 
-server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
+  server.on('error', (err)=>{ console.error('[diagnostic] server error', err); });
+  return server;
+}
+
+// Only bind a port when this file is the entry point (`node apiServer.js`, nodemon, Docker). When it is
+// imported -- by the Vercel/serverless handler in api/index.js, or by a test -- the Express app is
+// exported instead and the platform drives it, so calling listen() would open a port nobody asked for and
+// (on serverless) fail. The app is a valid (req, res) handler on its own.
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = app;
+module.exports.startServer = startServer;
+module.exports.baseUrlFromRequest = baseUrlFromRequest;

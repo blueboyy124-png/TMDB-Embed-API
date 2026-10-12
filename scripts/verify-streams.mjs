@@ -11,7 +11,7 @@
  * Usage:
  *   node scripts/verify-streams.mjs
  *   node scripts/verify-streams.mjs --type series --id 1399 --season 1 --episode 1
- *   node scripts/verify-streams.mjs --base http://192.168.86.75:8787 --provider-timeout 25000
+ *   node scripts/verify-streams.mjs --base http://172.21.58.130:8787 --provider-timeout 25000
  */
 import process from 'node:process';
 

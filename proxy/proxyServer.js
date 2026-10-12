@@ -6,6 +6,7 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 const http = require('http');
 const https = require('https');
+const { baseUrlFromRequest } = require('../utils/publicUrl');
 
 // One shared, bounded connection pool per upstream scheme.
 //
@@ -325,8 +326,9 @@ function createProxyRoutes(app) {
             }
             if (!response.ok) return res.status(response.status).json({ error: `M3U8 fetch failed: ${response.status}` });
             const text = await response.text();
-            const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-            const baseProxyUrl = `${protocol}://${req.get('host')}`;
+            // Segment URLs written back into the playlist must point at the public host this request
+            // arrived on; see utils/publicUrl.js. Previously `${x-forwarded-proto}://${host}`.
+            const baseProxyUrl = baseUrlFromRequest(req);
             const rewritten = rewriteM3u8(text, targetUrl, baseProxyUrl, headers);
             res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');

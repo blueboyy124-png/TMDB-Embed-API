@@ -25,6 +25,7 @@
       <form id="searchForm" class="search" role="search" autocomplete="off">
         <button type="button" id="searchToggle" class="icon-btn" aria-label="Search" aria-expanded="false"><span data-icon="search"></span></button>
         <input id="searchInput" type="search" placeholder="Search movies and series" aria-label="Search movies and series" spellcheck="false">
+        <button type="button" id="searchClear" class="icon-btn search-clear" aria-label="Clear search" hidden><span data-icon="close"></span></button>
       </form>
       <button id="shortcutsBtn" class="icon-btn hide-mobile" aria-label="Keyboard shortcuts"><span data-icon="keyboard"></span></button>
       <span id="statusDot" class="status-dot" role="status" aria-label="Checking server" title="Checking server…"></span>
@@ -167,6 +168,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+  <script src="search.js"></script>
   <script src="player.js"></script>
   <script src="app.js"></script>
 </body>

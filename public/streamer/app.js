@@ -6,15 +6,19 @@
   'use strict';
 
   /* =====================================================================
-   * Config — ONE constant decides the API origin. It always uses the same
-   * host the page was opened on, so proxy URLs built from the Host header
-   * stay consistent. Override with ?api=http://host:port if needed.
+   * Config — ONE constant decides the API origin.
+   * Default: the same origin that served this page, whatever the host or
+   * scheme. A deployment on Vercel / Fly / a reverse proxy / a LAN address
+   * therefore just works, and proxy URLs stay on the host the client used.
+   * Nothing is pinned to port 8787 any more. Override with ?api=https://host
+   * for the edge case where the UI and the API live on different origins.
    * ===================================================================== */
   const API = (function () {
     const override = new URLSearchParams(location.search).get('api');
     if (override) return override.replace(/\/$/, '');
-    if (location.port === '8787') return location.origin;
-    return `${location.protocol === 'https:' ? 'http:' : location.protocol}//${location.hostname}:8787`;
+    if (location.protocol === 'http:' || location.protocol === 'https:') return location.origin;
+    // Opened from disk (file://) or a webview with no real origin: fall back to the dev port.
+    return 'http://localhost:8787';
   })();
 
   /* ---------- tiny utilities ---------- */
@@ -145,7 +149,8 @@
       if (json && json.success === false) throw new Error(json.error || 'The API reported an error');
       return json;
     } catch (err) {
-      if (err.name === 'TypeError' || err.name === 'AbortError') { health.check(); }
+      const cancelled = signal && signal.aborted;
+      if (!cancelled && (err.name === 'TypeError' || err.name === 'AbortError')) { health.check(); }
       throw err;
     } finally { clearTimeout(timer); }
   }
@@ -185,7 +190,11 @@
     p.catch(() => cache.delete(key));
     return p;
   }
-  const getTrending = () => memo('trending', 5 * 60e3, () => api('/api/trending').then((j) => (j.results || []).filter((x) => x.type === 'movie' || x.type === 'series')));
+  const getTrending = () => memo('trending', 5 * 60e3, () => api('/api/trending').then((j) => {
+    const r = (j.results || []).filter((x) => x.type === 'movie' || x.type === 'series');
+    MacSearch.learn(r);
+    return r;
+  }));
   const getMeta = (type, id) => memo(`meta:${type}:${id}`, 30 * 60e3, () => api(`/api/metadata/${type}/${id}`));
   const getEpisodes = (id, season) => memo(`eps:${id}:${season}`, 30 * 60e3, () => api(`/api/metadata/series/${id}/episodes?season=${season}`).then((j) => j.episodes || []));
   const seasonList = (meta) => {
@@ -222,11 +231,9 @@
     const left = e.duration ? Math.max(0, Math.round((e.duration - e.positionSeconds) / 60)) : 0;
     const label = e.type === 'series' ? `S${e.season} · E${e.episode}${e.episodeName ? ' · ' + e.episodeName : ''}` : (yearOf(e) || 'Movie');
     const sub = e.positionSeconds < 5 && e.type === 'series' ? `Up next · ${label}` : (left ? `${left} min left · ${label}` : label);
-    return `<article class="ccard">
+    return `<article class="ccard" data-key="${esc(e.type)}:${esc(e.id)}">
       <button type="button" class="cc-main" data-resume="${esc(e.type)}:${esc(e.id)}" aria-label="Resume ${esc(e.title)}">
-        ${imgBox(e.backdrop || e.poster, e.title)}
-        <span class="cc-play">${icon('play')}</span>
-        <span class="bar"><i style="width:${pct}%"></i></span>
+        ${imgBox((e.type === 'series' && e.still) || e.backdrop || e.poster, e.title).replace(/<\/div>$/, `<span class="cc-play">${icon('play')}</span><span class="bar"><i style="width:${pct}%"></i></span></div>`)}
         <span class="cc-text"><strong>${esc(e.title)}</strong><span>${esc(sub)}</span></span>
       </button>
       <button type="button" class="cc-x" data-remove="${esc(e.type)}:${esc(e.id)}" aria-label="Remove ${esc(e.title)} from Continue Watching">${icon('close')}</button>
@@ -298,15 +305,35 @@
     const series = items.filter((i) => i.type === 'series');
     const rails = [];
     if (prog.length) rails.push(railHTML('Continue watching', 'Pick up where you left off', prog.map(continueCardHTML).join(''), 'rail-continue'));
-    rails.push(railHTML('Trending now', 'Top ' + Math.min(10, items.length), items.slice(0, 10).map((it, i) => `<div class="ranked"><span class="num" aria-hidden="true">${i + 1}</span>${cardHTML(it)}</div>`).join(''), 'rail-ranked'));
+    rails.push(railHTML('Trending now', 'This week', items.slice(0, 12).map(cardHTML).join('')));
     if (movies.length > 2) rails.push(railHTML('Movies', 'Trending', movies.map(cardHTML).join('')));
     if (series.length > 2) rails.push(railHTML('Series', 'Trending', series.map(cardHTML).join('')));
     const railsEl = $('#rails', view);
     railsEl.innerHTML = rails.join('');
     wireRails(railsEl);
     settleImages(railsEl);
+    backfillStills(prog, token);
 
     buildHero(hero, items.slice(0, 5), token);
+  }
+
+  /** Older saved entries have no episode still; fetch it once from the episodes endpoint and remember it. */
+  function backfillStills(entries, token) {
+    entries.filter((e) => e.type === 'series' && !e.still && e.season && e.episode).forEach(async (e) => {
+      try {
+        const eps = await getEpisodes(e.id, e.season);
+        const ep = eps.find((x) => x.episode === e.episode);
+        if (!ep || !ep.still) return;
+        const cur = getProgress(e.type, e.id);
+        if (cur && cur.season === e.season && cur.episode === e.episode) putProgress(Object.assign({}, cur, { still: ep.still }));
+        if (token !== routeToken) return;
+        const wrap = $(`.ccard[data-key="${e.type}:${e.id}"] .img-wrap`, view);
+        if (!wrap) return;
+        let img = $('img', wrap);
+        if (!img) { img = document.createElement('img'); img.alt = ''; img.decoding = 'async'; wrap.insertBefore(img, wrap.firstChild); }
+        wrap.classList.remove('failed'); img.classList.remove('loaded'); img.src = ep.still;
+      } catch (_) { /* keep the show backdrop */ }
+    });
   }
 
   function heroSlideHTML(meta, idx) {
@@ -416,27 +443,60 @@
     }
   }
 
-  let searchSeq = 0;
+  let searchCtrl = null;
+  const fetchSearchRows = (q, signal) => api(`/api/search?q=${encodeURIComponent(q)}`, { signal, timeout: 15000 })
+    .then((j) => (j.results || []).filter((i) => i.type === 'movie' || i.type === 'series'));
+
   async function renderSearch(q, token) {
     const input = $('#searchInput');
     if (input.value !== q) input.value = q;
+    syncSearchClear();
     openSearch(true);
-    if (!q.trim()) { setView(`<div class="page-pad"><h1 class="page-title">Search</h1>${stateHTML('Find something to watch', 'Search for any movie or series.')}</div>`); return; }
-    const seq = ++searchSeq;
-    setView(`<div class="page-pad"><h1 class="page-title">Results for “${esc(q)}”</h1><p class="page-sub" id="searchSub">Searching…</p><div class="grid">${skelCards(12, '100%')}</div></div>`);
+    if (searchCtrl) searchCtrl.abort();                       // cancel the previous query's requests
+    if (!q.trim()) {
+      searchCtrl = null;
+      setView(`<div class="page-pad"><h1 class="page-title">Search</h1>${stateHTML('Find something to watch', 'Search any movie or series. Typos and missing spaces are fine.')}</div>`);
+      return;
+    }
+    const ctrl = searchCtrl = new AbortController();
+    setView(`<div class="page-pad"><h1 class="page-title">Results for “${esc(q.trim())}”</h1><p class="page-sub" id="searchSub">Searching…</p><div class="grid">${skelCards(12, '100%')}</div></div>`);
+    // Seed "did you mean" with what we know: trending + the user's own history.
+    try { await getTrending(); } catch (_) { /* search still works without it */ }
+    Object.values(getAllProgress()).forEach((e) => MacSearch.learn([e.title]));
+    if (ctrl.signal.aborted || token !== routeToken) return;
     try {
-      const j = await api(`/api/search?q=${encodeURIComponent(q)}`);
-      if (token !== routeToken || seq !== searchSeq) return;
-      const items = (j.results || []).filter((i) => i.type === 'movie' || i.type === 'series');
-      $('#searchSub').textContent = items.length ? `${items.length} result${items.length > 1 ? 's' : ''}` : '';
-      $('.grid', view).outerHTML = items.length ? `<div class="grid">${items.map(cardHTML).join('')}</div>` : stateHTML('No matches', `Nothing found for “${q}”. Check the spelling or try a shorter title.`);
+      const out = await MacSearch.search(q, fetchSearchRows, ctrl.signal);
+      if (ctrl.signal.aborted || token !== routeToken) return;
+      const n = out.results.length;
+      const sub = $('#searchSub');
+      if (n && out.corrected) sub.innerHTML = `Showing results for <strong>${esc(out.corrected)}</strong> <span class="dim">· you searched “${esc(q.trim())}”</span>`;
+      else sub.textContent = n ? `${n} result${n > 1 ? 's' : ''}` : '';
+      $('.grid', view).outerHTML = n ? `<div class="grid">${out.results.map(cardHTML).join('')}</div>` : noMatchHTML(q);
       settleImages(view);
+      if (!n) fillSuggestions();
     } catch (err) {
-      if (token !== routeToken || seq !== searchSeq) return;
+      if (err.name === 'AbortError' || ctrl.signal.aborted || token !== routeToken) return;
       $('#searchSub').textContent = '';
-      $('.grid', view).outerHTML = stateHTML('Search failed', health.ok === false ? 'The MacStream API appears to be offline.' : (err.message || ''), '<button class="btn btn-light" data-retry>Try again</button>');
+      $('.grid', view).outerHTML = stateHTML('Search failed', health.ok === false ? 'The MacStream API appears to be offline.' : 'Something went wrong while searching.', '<button class="btn btn-light" data-retry>Try again</button>');
     }
   }
+
+  function noMatchHTML(q) {
+    return `<div class="state"><strong>No matches for “${esc(q.trim())}”</strong><span>Check the spelling, or try fewer words.</span><div class="chips" id="sugChips" aria-label="Popular right now"></div></div>`;
+  }
+  /** Suggestion chips use real trending titles already fetched; nothing is invented. */
+  async function fillSuggestions() {
+    const box = $('#sugChips'); if (!box) return;
+    try {
+      const items = (await getTrending()).slice(0, 5);
+      if (!$('#sugChips')) return;
+      box.innerHTML = items.map((i) => `<button type="button" class="chip" data-q="${esc(i.title)}">${esc(i.title)}</button>`).join('');
+    } catch (_) { /* no chips */ }
+  }
+  view.addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-q]');
+    if (chip) { searchInput.value = chip.dataset.q; location.hash = `#/search?q=${encodeURIComponent(chip.dataset.q)}`; }
+  });
 
   /* ----- Title detail ----- */
   async function renderTitle(type, id, token) {
@@ -582,7 +642,12 @@
   });
   searchForm.addEventListener('submit', (e) => { e.preventDefault(); clearTimeout(searchDebounce); const q = searchInput.value.trim(); if (q) location.hash = `#/search?q=${encodeURIComponent(q)}`; });
   searchInput.addEventListener('blur', () => { if (!searchInput.value.trim() && !searchActive()) openSearch(false); });
-  searchInput.addEventListener('keydown', (e) => { if (e.key === 'Escape') { searchInput.blur(); } });
+  searchInput.addEventListener('keydown', (e) => { if (e.key === 'Escape') { if (searchInput.value) { clearSearch(); } else searchInput.blur(); } });
+  const searchClear = $('#searchClear');
+  function syncSearchClear() { searchClear.hidden = !searchInput.value; }
+  function clearSearch() { searchInput.value = ''; syncSearchClear(); searchInput.focus(); if (searchActive()) location.hash = '#/search'; }
+  searchClear.addEventListener('click', clearSearch);
+  searchInput.addEventListener('input', syncSearchClear);
 
   window.addEventListener('hashchange', () => route(false));
   window.addEventListener('scroll', () => $('#nav').classList.toggle('scrolled', window.scrollY > 24), { passive: true });
@@ -706,7 +771,10 @@
     };
 
     playerEl.hidden = false;
+    playerEl.tabIndex = -1;
     setMode('full');
+    if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+    playerEl.focus({ preventScroll: true });
     setIcon(P.cPlay, 'pause'); setIcon(P.mPlay, 'pause');
     P.cNext.hidden = true;
     P.stall.hidden = true; P.upnext.hidden = true; P.pBigPlay.hidden = true;
@@ -1087,8 +1155,14 @@
     putProgress({
       type: S.type, id: S.id, season: S.season || null, episode: S.episode || null, episodeName: S.episodeName || '',
       positionSeconds: Math.floor(t), duration: d && isFinite(d) ? Math.floor(d) : (getProgress(S.type, S.id) || {}).duration || 0,
-      updatedAt: Date.now(), title: S.title, poster: S.poster || null, backdrop: S.backdrop || null, year: S.year || ''
+      updatedAt: Date.now(), title: S.title, poster: S.poster || null, backdrop: S.backdrop || null, year: S.year || '',
+      still: S.type === 'series' ? (S.episodeStill || prevStill(S.type, S.id, S.season, S.episode)) : null
     });
+  }
+  // Reuse a stored still when it belongs to the same episode (episode context may not have loaded yet).
+  function prevStill(type, id, season, episode) {
+    const old = getProgress(type, id);
+    return old && old.season === season && old.episode === episode ? (old.still || null) : null;
   }
   window.addEventListener('pagehide', () => saveNow(true));
   document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(true); });
@@ -1098,7 +1172,7 @@
     S.finished = true;
     if (S.type === 'series' && S.next) {
       // Point Continue Watching at the next episode.
-      putProgress({ type: S.type, id: S.id, season: S.next.season, episode: S.next.episode, episodeName: S.next.name || '', positionSeconds: 0, duration: 0, upNext: true, updatedAt: Date.now(), title: S.title, poster: S.poster || null, backdrop: S.backdrop || null, year: S.year || '' });
+      putProgress({ type: S.type, id: S.id, season: S.next.season, episode: S.next.episode, episodeName: S.next.name || '', still: S.next.still || null, positionSeconds: 0, duration: 0, upNext: true, updatedAt: Date.now(), title: S.title, poster: S.poster || null, backdrop: S.backdrop || null, year: S.year || '' });
       if (prefs.autoNext) { playNext(); return; }
       showUpNext(0);
     } else {
@@ -1134,7 +1208,7 @@
     const n = S.next, id = S.id, type = S.type;
     // Mark the current episode as done so resume doesn't send us back here.
     S.finished = true;
-    putProgress({ type, id, season: n.season, episode: n.episode, episodeName: n.name || '', positionSeconds: 0, duration: 0, upNext: true, updatedAt: Date.now(), title: S.title, poster: S.poster || null, backdrop: S.backdrop || null, year: S.year || '' });
+    putProgress({ type, id, season: n.season, episode: n.episode, episodeName: n.name || '', still: n.still || null, positionSeconds: 0, duration: 0, upNext: true, updatedAt: Date.now(), title: S.title, poster: S.poster || null, backdrop: S.backdrop || null, year: S.year || '' });
     startPlayback({ type, id, season: n.season, episode: n.episode });
   }
 
@@ -1169,7 +1243,8 @@
     if (e.key === '/' && !S) { e.preventDefault(); openSearch(true); searchInput.focus(); return; }
     if (!S || playerEl.dataset.mode !== 'full') return;
 
-    const isBtn = tag === 'button' || tag === 'a' || tag === 'input';
+    const inPlayer = playerEl.contains(e.target);
+    const isBtn = inPlayer && (tag === 'button' || tag === 'a' || tag === 'input');
     switch (e.key) {
       case ' ': if (isBtn) return; e.preventDefault(); togglePlay(); bumpControls(); break;
       case 'k': togglePlay(); bumpControls(); break;

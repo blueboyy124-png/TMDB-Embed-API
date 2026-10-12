@@ -171,7 +171,8 @@
     _checkStall() {
       const v = this.video;
       const now = performance.now();
-      const starving = !v.paused && !v.ended && !v.seeking && v.readyState < 3 && (v.currentSrc || this.hls);
+      // A seek whose data never arrives stays `seeking` forever, so it must count as starving too.
+      const starving = !v.paused && !v.ended && v.readyState < 3 && (v.currentSrc || this.hls);
       if (!starving) {
         if (v.readyState >= 3) { this.stalledSince = 0; this.samples = []; }
         return;

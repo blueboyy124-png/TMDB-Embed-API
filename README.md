@@ -93,7 +93,7 @@ running you can open it from any phone, tablet, or computer on the same network 
 # Find this machine's address
 ipconfig getifaddr en0        # macOS; use `ip addr` (Linux) or `ipconfig` (Windows) elsewhere
 ```
-Then on the other device browse to **`http://<that-ip>:8787/`** (e.g. `http://192.168.86.75:8787/`).
+Then on the other device browse to **`http://<that-ip>:8787/`** (e.g. `http://172.21.58.130:8787/`).
 The startup banner prints the exact URL to copy, one line per interface.
 
 - If it will not connect: allow incoming connections for `node` in **System Settings → Network →
@@ -171,6 +171,10 @@ If both `TMDB_API_KEY` and `TMDB_API_KEYS` are provided, rotation uses the array
 |----------|---------|-------|
 | `API_PORT` | Port the server listens on | Defaults to `8787` |
 | `BIND_HOST` | Interface to bind | Defaults to `0.0.0.0` |
+| `PUBLIC_BASE_URL` | Public origin used to build returned stream/proxy URLs | Unset = derived per request from `Host` / `X-Forwarded-*`. Set for a custom domain or a mounted path |
+| `TRUST_PROXY` | Reverse-proxy hops to trust for client IP / protocol | Defaults to `1`; accepts a number, `true`/`false`, or an Express value like `loopback` |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Override the default admin login | Needed on read-only filesystems (e.g. serverless) where `utils/auth-users.json` cannot be written |
+| `AUTH_USERS` | Pre-hashed users, JSON array of `{ username, hash }` | Alternative to `ADMIN_*`; `hash` is `"<salt>:<derived>"` |
 | `TMDB_API_KEY` | Single TMDB key (legacy) | Use if you only have one key |
 | `TMDB_API_KEYS` | JSON array of keys | Overrides single key when present |
 | `DEFAULT_PROVIDERS` | Comma-separated default providers | Used by the aggregate endpoint |
@@ -650,7 +654,40 @@ node scripts/verify-test-player.mjs            # BASE=http://host:port to point 
 | Logs | Pipe stdout to centralized logger |
 | Scaling | Use a single instance unless providers are CPU bound |
 
-For ephemeral platforms (e.g., Vercel) note that some providers use temporary directories; avoid enabling disk-heavy cache directories.
+### Running on a public URL (any host)
+
+The API is host-agnostic: it binds `0.0.0.0` by default and builds every returned stream URL from the
+request, so the same code serves `localhost`, a LAN IP, a tunnel, or a real domain with no edits.
+
+- **Reverse proxy / custom domain.** Terminate TLS at the proxy and forward to the API port. The API
+  reads `X-Forwarded-Proto` / `X-Forwarded-Host` (and the RFC 7239 `Forwarded` header) to build proxy
+  URLs, so `/m3u8-proxy` and `/ts-proxy` links point at your domain rather than an internal address.
+  If the proxy rewrites `Host`, either pass `X-Forwarded-Host` through or pin the origin with
+  `PUBLIC_BASE_URL=https://your.domain`. `TRUST_PROXY` sets how many hops are trusted (default `1`).
+- **Nginx example.** `proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` and allow long reads for the media
+  proxy routes.
+- **Docker / Fly.io / Railway / Render / a VPS.** Use the included `Dockerfile` / `docker-compose.yml`.
+  Set `PUBLIC_BASE_URL` if the platform's `Host` header is not your public domain. Persist
+  `utils/user-config.json` and `utils/auth-users.json` with a volume.
+
+### Serverless platforms (Vercel and friends)
+
+`api/index.js` exports the Express app as a `(req, res)` handler and `vercel.json` rewrites every
+path to it, so the project deploys as-is. Two things behave differently from a long-running host:
+
+- **Read-only filesystem.** `utils/user-config.json` and `utils/auth-users.json` cannot be written, so
+  the config UI cannot save and the default user cannot be created. Configure everything through
+  environment variables instead (`TMDB_API_KEY`, `FEBBOX_COOKIES`, `DEFAULT_PROVIDERS`, and
+  `ADMIN_USERNAME` / `ADMIN_PASSWORD` for login). Sessions are signed with an ephemeral key, so a
+  restart logs everyone out.
+- **The media proxy is best-effort.** `/ts-proxy` and `/m3u8-proxy` stream media through the function,
+  and serverless platforms cap response size and execution time. Leave `ENABLE_PROXY` off to hand out
+  direct upstream URLs, or run the container image when you need the full proxy.
+
+Providers can take 20–45s to aggregate; `vercel.json` sets `maxDuration: 60` so the aggregate still
+returns `partial: true` instead of being cut off. For the complete feature set, prefer the container.
+
 
 ---
 

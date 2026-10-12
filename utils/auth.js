@@ -10,19 +10,66 @@ let usersCache = null;
 let lastLoaded = 0;
 const LOAD_INTERVAL_MS = 30 * 1000; // reload at most every 30s
 
+// Credentials can be supplied by the environment for hosts that cannot write files (serverless, some
+// container platforms). Without this, the read-only filesystem meant ensureAuthFile() threw on the very
+// first login and the API was unusable: no file, no in-memory user, 500 on /auth/login.
+//   AUTH_USERS       JSON array of { username, hash } -- hash is the same "<salt>:<derived>" form the file uses
+//   ADMIN_USERNAME + ADMIN_PASSWORD  a single user, hashed on load
+//
+// Resolved once per process: hashing the ADMIN_PASSWORD costs a PBKDF2 run, and this is read on every
+// login attempt, so it must not re-hash each time.
+let envUsersResolved = false;
+let envUsersCache = null;
+function envUsers() {
+  if (envUsersResolved) return envUsersCache;
+  envUsersResolved = true;
+  if (process.env.AUTH_USERS) {
+    try {
+      const parsed = JSON.parse(process.env.AUTH_USERS);
+      const list = Array.isArray(parsed) ? parsed : parsed && parsed.users;
+      const valid = (Array.isArray(list) ? list : []).filter(u => u && u.username && u.hash);
+      if (valid.length) { envUsersCache = valid; return envUsersCache; }
+      console.warn('[auth] AUTH_USERS is set but contains no usable { username, hash } entries');
+    } catch (e) {
+      console.warn('[auth] AUTH_USERS is not valid JSON:', e.message);
+    }
+  }
+  if (process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD) {
+    envUsersCache = [{ username: process.env.ADMIN_USERNAME, hash: hashPassword(process.env.ADMIN_PASSWORD).hash }];
+    return envUsersCache;
+  }
+  return null;
+}
+
+let warnedDefaultPassword = false;
+function defaultUsers() {
+  if (!warnedDefaultPassword) {
+    console.warn('[auth] Using default credentials "admin" / "change-me". CHANGE THE PASSWORD IMMEDIATELY (or set ADMIN_USERNAME/ADMIN_PASSWORD).');
+    warnedDefaultPassword = true;
+  }
+  return [{ username: 'admin', hash: hashPassword('change-me').hash }];
+}
+
 function ensureAuthFile() {
   if (fs.existsSync(AUTH_FILE)) return;
-  const defaultPassword = 'change-me';
-  const { hash } = hashPassword(defaultPassword);
+  if (envUsers()) return; // credentials come from the environment; nothing to persist
   const data = {
     info: 'Initial default credentials. CHANGE THE PASSWORD IMMEDIATELY using /auth/change-password after logging in.',
-    users: [ { username: 'admin', hash } ]
+    users: defaultUsers()
   };
-  fs.writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2));
-  console.warn('[auth] Created default auth-users.json with username "admin" and password "change-me". CHANGE IT NOW.');
+  try {
+    fs.writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2));
+    console.warn('[auth] Created default auth-users.json with username "admin" and password "change-me". CHANGE IT NOW.');
+  } catch (e) {
+    // Read-only or ephemeral filesystem (serverless, locked-down container). Keep the default user in
+    // memory so the process still starts and can be logged into; it simply will not survive a restart.
+    console.warn(`[auth] Could not write auth-users.json (${e.message}); using the default admin user in memory only. Set ADMIN_USERNAME/ADMIN_PASSWORD or AUTH_USERS on this host.`);
+  }
 }
 
 function loadUsers(force=false){
+  const fromEnv = envUsers();
+  if (fromEnv) { usersCache = fromEnv; lastLoaded = Date.now(); return usersCache; }
   if (!force && usersCache && (Date.now() - lastLoaded) < LOAD_INTERVAL_MS) return usersCache;
   ensureAuthFile();
   try {
@@ -32,7 +79,9 @@ function loadUsers(force=false){
     lastLoaded = Date.now();
   } catch (e) {
     console.error('[auth] Failed loading users file:', e.message);
-    usersCache = [];
+    // Fall back to the in-memory default rather than zero users, which would lock everyone out.
+    usersCache = defaultUsers();
+    lastLoaded = Date.now();
   }
   return usersCache;
 }
