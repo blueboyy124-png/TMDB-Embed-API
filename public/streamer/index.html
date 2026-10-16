@@ -43,17 +43,35 @@
   <!-- ============ PLAYER ============ -->
   <section id="player" class="player" hidden data-mode="full" data-controls="visible" aria-label="Video player">
     <video id="video" playsinline preload="auto"></video>
+    <div id="captions" class="captions" aria-hidden="true" hidden></div>
 
     <div class="p-scrim p-scrim-top"></div>
     <div class="p-scrim p-scrim-bottom"></div>
 
     <div class="p-top">
-      <button id="pBack" class="icon-btn lg" aria-label="Minimise player (Esc)"><span data-icon="chevDown"></span></button>
+      <button id="pBack" class="icon-btn lg" aria-label="Minimise player / Picture-in-Picture (Esc)"><span data-icon="chevDown"></span></button>
       <div class="p-title">
         <h2 id="pTitle"></h2>
         <p id="pSub"></p>
       </div>
       <button id="pClose" class="icon-btn lg" aria-label="Stop playback and close"><span data-icon="close"></span></button>
+    </div>
+
+    <!-- pre-playback loading screen: artwork + honest progress -->
+    <div id="pLoader" class="p-loader" role="status" aria-live="polite" hidden>
+      <img id="pLoaderImg" class="pl-img" alt="" hidden>
+      <div class="pl-shade"></div>
+      <div class="pl-body">
+        <p class="pl-kicker" id="pLoaderTitle"></p>
+        <h3 class="pl-text" id="pLoaderText">Loading</h3>
+        <p class="pl-sub" id="pLoaderSub"></p>
+        <div class="pl-bar" id="pLoaderBar" aria-hidden="true"><i></i></div>
+        <button id="pLoaderSkip" class="btn btn-sm btn-ghost pl-skip" hidden>Start with what’s ready</button>
+        <div class="pl-actions" id="pLoaderActions" hidden>
+          <button id="pLoaderRetry" class="btn btn-sm btn-light">Try again</button>
+          <button id="pLoaderStreams" class="btn btn-sm btn-ghost">Open Streams</button>
+        </div>
+      </div>
     </div>
 
     <div class="p-center">
@@ -88,7 +106,9 @@
         </div>
         <div class="ctl-right">
           <button id="cNext" class="btn btn-sm btn-ghost" hidden aria-label="Next episode"><span data-icon="next"></span><span>Next</span></button>
+          <button id="cCaptions" class="icon-btn" aria-label="Subtitles (c)" aria-haspopup="menu" aria-expanded="false" aria-controls="capMenu"><span data-icon="cc"></span></button>
           <button id="cStreams" class="btn btn-sm btn-ghost streams-btn" aria-haspopup="dialog" aria-controls="drawer"><span data-icon="layers"></span><span>Streams</span></button>
+          <button id="cPip" class="icon-btn" aria-label="Picture-in-Picture (floats over other apps)"><span data-icon="pip"></span></button>
           <button id="cMini" class="icon-btn" aria-label="Mini player (Esc)"><span data-icon="mini"></span></button>
           <button id="cFull" class="icon-btn" aria-label="Fullscreen (f)"><span data-icon="expand"></span></button>
         </div>
@@ -131,6 +151,21 @@
       </div>
     </div>
 
+    <!-- subtitles menu -->
+    <div id="capMenu" class="cap-menu" role="menu" aria-label="Subtitles" hidden>
+      <div class="cap-head"><strong>Subtitles</strong><button id="capClose" class="icon-btn" aria-label="Close subtitles menu"><span data-icon="close"></span></button></div>
+      <div id="capList" class="cap-list"></div>
+      <p id="capEmpty" class="cap-empty" hidden>This stream doesn’t include subtitles. You can add your own .srt or .vtt file.</p>
+      <div class="cap-sync" id="capSync" hidden>
+        <span>Sync</span>
+        <button id="capEarlier" class="icon-btn" aria-label="Show subtitles 0.5 seconds earlier">−</button>
+        <output id="capOffset" aria-live="polite">0.0s</output>
+        <button id="capLater" class="icon-btn" aria-label="Show subtitles 0.5 seconds later">+</button>
+      </div>
+      <button id="capAdd" class="btn btn-sm btn-ghost cap-add">Add subtitle file…</button>
+      <input id="capFile" type="file" accept=".srt,.vtt,text/vtt,application/x-subrip" hidden>
+    </div>
+
     <div id="toast" class="toast" role="status" hidden></div>
 
     <!-- streams drawer -->
@@ -141,6 +176,11 @@
           <p id="drawerSub">Loading sources…</p>
         </div>
         <button id="drawerClose" class="icon-btn" aria-label="Close streams"><span data-icon="close"></span></button>
+      </div>
+      <div class="track-seg" id="trackSeg" role="group" aria-label="Anime audio" hidden>
+        <span>Anime audio</span>
+        <button type="button" data-track="dub" aria-pressed="true">English dub</button>
+        <button type="button" data-track="sub" aria-pressed="false">Japanese · subs</button>
       </div>
       <p class="drawer-note" id="drawerNote">Sorted by quality, playable rows first. The best playable row is picked automatically.</p>
       <ul id="drawerList" class="stream-list"></ul>
@@ -159,6 +199,7 @@
         <div><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Seek 10 seconds</dd></div>
         <div><dt><kbd>f</kbd></dt><dd>Fullscreen</dd></div>
         <div><dt><kbd>m</kbd></dt><dd>Mute</dd></div>
+        <div><dt><kbd>c</kbd></dt><dd>Subtitles on / off</dd></div>
         <div><dt><kbd>Esc</kbd></dt><dd>Dismiss offer → mini-player → stop &amp; save</dd></div>
         <div><dt><kbd>/</kbd></dt><dd>Search</dd></div>
         <div><dt><kbd>?</kbd></dt><dd>This panel</dd></div>
@@ -169,6 +210,7 @@
 
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
   <script src="search.js"></script>
+  <script src="captions.js"></script>
   <script src="player.js"></script>
   <script src="app.js"></script>
 </body>

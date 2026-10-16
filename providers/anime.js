@@ -1,7 +1,7 @@
-const axios = require('axios');
 const { getDetails } = require('../utils/tmdb');
 const anilist = require('../utils/anilist');
 const episodeNumbering = require('../utils/episodeNumbering');
+const { dispatcherFor } = require('../utils/anixoAgent');
 
 /*
  * Anime provider.
@@ -101,6 +101,14 @@ const linkCache = new BoundedTtlCache(2000);
 const LINK_TTL = 10 * 60 * 1000;
 const NEG_TTL = 45 * 1000;   // an empty answer is usually a flap, not a real gap: re-check it soon
 
+// anixo's resolved `streamUrl` carries a ticket that is good for SECONDS, not minutes: measured dying at ~11s
+// in one run and lasting ~44s in another. The generic LINK_TTL above is ten MINUTES, so a warm server kept
+// handing back long-dead anixo URLs, re-verified them on every request, and reported `anime: empty` -- while a
+// cold process, resolving fresh tokens, reported twelve streams. That is the whole intermittent-anime bug, and
+// it is why a page refresh appeared to fix it. Cache anixo links only long enough to collapse callers that
+// arrive at the same instant, never long enough to serve an expired ticket.
+const ANIXO_LINK_TTL = 8 * 1000;
+
 async function sourceVidsrc(ctx) {
     if (!ctx.tmdbId) return [];
     const path = ctx.movie ? `movie/${ctx.tmdbId}` : `tv/${ctx.tmdbId}/${ctx.season}/${ctx.episode}`;
@@ -183,6 +191,11 @@ async function sourceVidsrc(ctx) {
 //   3. GET streamUrl                                  -> a real HLS master (#EXTM3U, 1080p + 360p)
 // The ticket is minted per request and is time limited, so step 1 is repeated per lookup rather than cached.
 const ANIXO = 'https://anixo.buzz';
+// The embed page and the resolve endpoint sit behind an embed-domain authorization check. Fetched with no
+// Referer/Origin they answer 403 "Unauthorized Embed Domain" and carry no ticket, so every anixo lookup came
+// back empty and the anime provider contributed nothing at all. These are the headers the player expects from
+// a page embedding it; without them this source is dead weight (it was the only working anime source left).
+const ANIXO_EMBED_HEADERS = { Referer: `${ANIXO}/`, Origin: ANIXO };
 const ANIXO_SERVERS = [1, 2, 3, 4];   // each is a different CDN, so more of them is more redundancy
 const ANIXO_TRACKS = ['sub', 'dub'];
 // anixo 2, not more. Measured over four runs of the same 8 (track, server) pairs:
@@ -194,15 +207,20 @@ const ANIXO_CONCURRENCY = 2;
 
 async function sourceAnixo(ctx) {
     // This source is episode based. A movie has no episode to ask for, so say so instead of returning nothing quietly.
-    if (ctx.movie || !ctx.anilist?.id) return [];
-    // Anime sites number flat, so ask for the absolute episode where we have one. ctx.abs is deliberately
-    // left null when it cannot be worked out from TMDB, in which case fall back to the number asked for.
-    const ep = ctx.abs || ctx.episode;
+    if (ctx.movie) return [];
+    // Ask for the entry that actually holds the episode, not the series entry: AniList restarts at
+    // episode 1 every cour, so `anilistId=16498&episode=38` (AoT S1 entry, 25 eps) is a guaranteed
+    // 500. ctx.anixo is that mapping, computed once in getAnimeStreams; see utils/anilist.js.
+    // Falling back to the matched entry + absolute episode keeps single-entry franchises working.
+    const target = ctx.anixo
+        || (ctx.anilist?.id ? { id: ctx.anilist.id, idMal: ctx.anilist.idMal, episode: ctx.abs || ctx.episode } : null);
+    if (!target || !target.id) return [];
+    const ep = target.episode;
     if (!ep) return [];
 
-    const cacheKey = `anixo:${ctx.anilist.id}:${ep}`;
+    const cacheKey = `anixo:${target.id}:${ep}:${target.idMal || ''}`;
     const hit = linkCache.get(cacheKey);
-    if (hit && Date.now() - hit.t < (hit.v.length ? LINK_TTL : NEG_TTL)) return hit.v;
+    if (hit && Date.now() - hit.t < (hit.v.length ? ANIXO_LINK_TTL : NEG_TTL)) return hit.v;
 
     const out = [];
     const seen = new Set();
@@ -213,7 +231,7 @@ async function sourceAnixo(ctx) {
     // (you still get its fallbackStreams) but gives no real redundancy.
     const freshTicket = async track => {
         try {
-            const page = await getText(`${ANIXO}/embed/ani/${ctx.anilist.id}/${ep}/${track}`);
+            const page = await getText(`${ANIXO}/embed/ani/${target.id}/${ep}/${track}`, ANIXO_EMBED_HEADERS);
             return page.match(/const ticket\s*=\s*"([^"]+)"/)?.[1] || null;
         } catch (e) {
             if (process.env.ANIME_DEBUG) console.log('[Anime] anixo page failed:', e.message.slice(0, 50));
@@ -222,8 +240,9 @@ async function sourceAnixo(ctx) {
     };
 
     // Phase 1, one ticket per track. A track with no ticket has no stream at any server, so this is the cheap
-    // way to answer "is this episode here at all": two requests, and a title anixo does not index (which is
-    // common -- e.g. Attack on Titan S2) costs those two instead of the whole sweep below.
+    // way to answer "is this episode here at all": two requests, and a title anixo does not index costs those
+    // two instead of the whole sweep below. (Later seasons of a split franchise are indexed under their own
+    // AniList entry; that mapping happens before this point -- see ctx.anixo.)
     const probes = await mapLimit(ANIXO_TRACKS, ANIXO_CONCURRENCY, async track => ({ track, ticket: await freshTicket(track) }));
     // Phase 2, the live tracks only. This used to be `for track { for server { page; resolve } }`, i.e. sixteen
     // round trips one after another, and it was the slowest thing in the entire API (13-27s for one episode
@@ -239,9 +258,9 @@ async function sourceAnixo(ctx) {
         const t = ticket || await freshTicket(track);
         if (!t) return [];
         try {
-            const q = `anilistId=${ctx.anilist.id}&episode=${ep}&track=${track}&server=${server}`
-                + (ctx.anilist.idMal ? `&malId=${ctx.anilist.idMal}` : '');
-            const data = await getJson(`${ANIXO}/api/stream/resolve?${q}`, { Referer: `${ANIXO}/`, 'x-embed-ticket': t });
+            const q = `anilistId=${target.id}&episode=${ep}&track=${track}&server=${server}`
+                + (target.idMal ? `&malId=${target.idMal}` : '');
+            const data = await getJson(`${ANIXO}/api/stream/resolve?${q}`, { ...ANIXO_EMBED_HEADERS, 'x-embed-ticket': t });
             if (!data?.streamUrl) return [];
             const label = `AniXo ${data.server || 'S' + server} ${track}`.trim();
             // The primary and its fallbacks are independent mirrors, so offer all of them.
@@ -250,7 +269,7 @@ async function sourceAnixo(ctx) {
             // These mirrors are byte-identical apart from the ticket, so they are not de-duplicated by URL.
             return [data.streamUrl, ...(data.fallbackStreams || [])]
                 .filter(Boolean)
-                .map(url => ({ url, quality: 'Auto', label, track, headers: { Referer: `${ANIXO}/` } }));
+                .map(url => ({ url, quality: 'Auto', label, track, headers: { Referer: `${ANIXO}/` }, verified: true }));
         } catch { return []; }   // that server is dead, the others still answer
     });
 
@@ -308,7 +327,8 @@ async function findAniList(titles, year, tmdbId, isTv) {
 
 // ---- fetches shared by the sources below --------------------------------------------------------
 // These hosts answer 403 to axios on the api.php calls even with identical headers, so use global
-// fetch here; isRealStream() below still uses axios and is unaffected (it only ever sees media URLs).
+// fetch here. isRealStream() below now does the same, for the same reason: anixo 403s axios on its own
+// stream endpoint too, which made every link look dead.
 // A dead upstream can hold a connection open for ~8s, so callers pass a shorter budget when a slow
 // answer is not worth waiting for.
 const TIMEOUT = 10000;
@@ -316,7 +336,11 @@ async function getText(url, headers = {}, timeout = TIMEOUT) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeout);
     try {
-        const r = await fetch(url, { headers: { 'User-Agent': UA, ...headers }, signal: ctl.signal, redirect: 'follow' });
+        // anixo is pinned to one shared connection so its IP-bound tokens are minted and used on the same
+        // public IP; see utils/anixoAgent.js. dispatcher is undefined for every other host.
+        const dispatcher = dispatcherFor(url);
+        const opts = { headers: { 'User-Agent': UA, ...headers }, signal: ctl.signal, redirect: 'follow' };
+        const r = await fetch(url, dispatcher ? { ...opts, dispatcher } : opts);
         if (r.status !== 200) throw new Error(`HTTP ${r.status} for ${url}`);
         return await r.text();
     } finally { clearTimeout(timer); }
@@ -368,18 +392,35 @@ function unpackPacker(html) {
 // only kept when the body really is a manifest.
 async function isRealStream(link) {
     if (!link || typeof link.url !== 'string' || !/^https?:\/\//i.test(link.url)) return false;
+    // Freshly minted links (anixo resolve) are already real at creation time; probing them again
+    // burns the same IP-bound token later and can flip 200->403 under serialization/latency.
+    if (link.verified === true) return true;
     const extensionless = !MEDIA.test(link.url);
     if (!extensionless && !/\.(m3u8|mp4|mkv|webm)(\?|#|$)/i.test(link.url)) return false;
+    const headers = { 'User-Agent': UA, ...(link.headers || {}) };
+    const dispatcher = dispatcherFor(link.url);
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 7000);
     try {
-        const headers = { 'User-Agent': UA, ...(link.headers || {}) };
+        // HLS (a real .m3u8, or an extensionless endpoint such as anixo's /api/stream/m3u8) is confirmed by
+        // its body, not its content type. Global fetch is used here for the same reason the api.php calls
+        // use it: these hosts 403 axios on their own endpoints even with identical headers, which made every
+        // anixo link look dead and the whole provider return nothing.
         if (/\.m3u8(\?|#|$)/i.test(link.url) || extensionless) {
-            const r = await axios.get(link.url, { headers, timeout: 7000, responseType: 'text', maxContentLength: 2e6, validateStatus: s => s === 200 });
-            return typeof r.data === 'string' && r.data.trimStart().startsWith('#EXTM3U');
+            const r = await fetch(link.url, dispatcher ? { headers, redirect: 'follow', signal: ctl.signal, dispatcher } : { headers, redirect: 'follow', signal: ctl.signal });
+            if (r.status !== 200) { if (process.env.ANIME_DEBUG) console.log(`[Anime] verify HTTP ${r.status}`); return false; }
+            const body = await r.text();
+            const ok = body.trimStart().startsWith('#EXTM3U');
+            if (!ok && process.env.ANIME_DEBUG) console.log(`[Anime] verify non-m3u8 (${r.status}) body="${body.slice(0, 70).replace(/\s+/g, ' ')}"`);
+            return ok;
         }
-        const r = await axios.get(link.url, { headers: { ...headers, Range: 'bytes=0-1' }, timeout: 7000, responseType: 'arraybuffer', validateStatus: s => s === 200 || s === 206 });
-        const type = String(r.headers['content-type'] || '');
+        const r = await fetch(link.url, { headers: { ...headers, Range: 'bytes=0-1' }, redirect: 'follow', signal: ctl.signal, ...(dispatcher ? { dispatcher } : {}) });
+        if (r.status !== 200 && r.status !== 206) return false;
+        const type = String(r.headers.get('content-type') || '');
+        try { await r.body?.cancel(); } catch (_) { /* body not needed; free the socket */ }
         return !/text\/html|json/i.test(type);
     } catch { return false; }
+    finally { clearTimeout(timer); }
 }
 
 async function getAnimeStreams(tmdbId, mediaType = 'movie', seasonNum = null, episodeNum = null) {
@@ -401,8 +442,23 @@ async function getAnimeStreams(tmdbId, mediaType = 'movie', seasonNum = null, ep
     const abs = isTv ? absoluteEpisode(details, season, episode) : null;
     // Named `al` rather than `anilist` so it does not shadow the imported module.
     const al = await findAniList(altTitles, year, tmdbId, isTv);
-    const ctx = { tmdbId, title, altTitles, year, season, episode, abs, movie: !isTv, anilist: al };
     if (isTv && abs === null) { console.log(`[Anime] cannot work out the absolute number for S${season}E${episode} of "${title}", skipping`); return []; }
+
+    // The (AniList id, episode-in-that-entry) an episode-based source should be asked for. Usually that is
+    // the matched entry and the absolute number, but AniList numbers one entry per cour, so for a split
+    // franchise (Attack on Titan, etc.) the absolute number belongs to a LATER entry that restarts at 1.
+    // Only the case that can actually be wrong is remapped -- when the absolute number is beyond the
+    // matched entry's own episode count, so single-entry long-runners cost no extra lookup. See
+    // utils/anilist.js:resolveEpisodeEntry.
+    let anixo = null;
+    if (isTv && al && al.id) {
+        if (abs > (al.episodes || 0)) {
+            const entry = await anilist.resolveEpisodeEntry(al, abs).catch(() => null);
+            if (entry && entry.id) anixo = { id: entry.id, idMal: entry.idMal, episode: entry.episode };
+        }
+        if (!anixo) anixo = { id: al.id, idMal: al.idMal, episode: abs };
+    }
+    const ctx = { tmdbId, title, altTitles, year, season, episode, abs, movie: !isTv, anilist: al, anixo };
 
     // Label with the anime's own title when we have it: TMDB's name for a long anime is often the English
     // dub title, and the sites these links come from are indexed under the original.
@@ -410,33 +466,45 @@ async function getAnimeStreams(tmdbId, mediaType = 'movie', seasonNum = null, ep
     const altName = (al && al.titles && al.titles.english && al.titles.english !== shownTitle) ? al.titles.english : null;
     const shown = [shownTitle, altName].filter(Boolean).join(' / ');
 
-    const found = [];
-    // Per-source timing is reported on the summary line below: the sources run concurrently, so when this
-    // provider is slow the useful question is always "which host", and that used to need guesswork.
-    const perSource = [];
-    await Promise.all(SOURCES.map(async src => {
-        const t = Date.now();
-        try { for (const l of (await src(ctx)) || []) found.push(l); }
-        catch (err) { console.warn(`[Anime] a source failed: ${err.message}`); }
-        perSource.push(`${src.name || 'source'}:${Date.now() - t}ms`);
-    }));
+    const collectSources = async () => {
+        const found = [];
+        // Per-source timing is reported on the summary line below: the sources run concurrently, so when this
+        // provider is slow the useful question is always "which host", and that used to need guesswork.
+        const perSource = [];
+        await Promise.all(SOURCES.map(async src => {
+            const t = Date.now();
+            try { for (const l of (await src(ctx)) || []) found.push(l); }
+            catch (err) { console.warn(`[Anime] a source failed: ${err.message}`); }
+            perSource.push(`${src.name || 'source'}:${Date.now() - t}ms`);
+        }));
+        const seen = new Set();
+        return { perSource, unique: found.filter(l => l && l.url && !seen.has(l.url) && seen.add(l.url)) };
+    };
 
-    const seen = new Set(), unique = found.filter(l => l && l.url && !seen.has(l.url) && seen.add(l.url));
-    // Verify with a bounded pool, and only as many links as can realistically matter.
+    const { perSource, unique } = await collectSources();
+
+    // Verify with a bounded pool, and only as many links as can realistically matter. This was `Promise.all`
+    // over every link found (up to ~20 simultaneous upstream probes per call) and it was the provider still
+    // working when the aggregate's soft deadline fired; twelve links is more than any player needs to choose
+    // from, and the rest are simply left unverified.
     //
-    // This was `Promise.all` over every link found, i.e. up to ~20 simultaneous upstream probes per call, and
-    // it was the provider still working when the aggregate's soft deadline fired. Multiplied by concurrent
-    // users that is hundreds of in-flight requests, which saturates the upstream and the event loop. Twelve
-    // verified links is more than any player needs to choose from; the rest are simply left unverified. The
-    // source-level linkCache is unaffected either way -- it caches what the sources found, before this step.
+    // Crucially it now probes ONE link per resolve, not one per mirror. anixo answers a resolve with the
+    // primary plus several byte-identical mirrors, so probing every mirror meant ~12 upstream GETs per
+    // request; repeated requests tripped anixo's anti-bot layer, which replies with a blanket HTTP 403, and
+    // the whole provider then looked empty -- the intermittent "anime has no streams" that a page refresh
+    // appeared to fix. One probe per group keeps the answer honest (a dead group is still dropped) while
+    // cutting the upstream load to a fraction, which is what actually stops the 403s.
     const MAX_VERIFY = 12;
-    const VERIFY_CONCURRENCY = 4;
-    const toVerify = unique.slice(0, MAX_VERIFY);
-    const verified = await mapLimit(toVerify, VERIFY_CONCURRENCY, async l => ((await isRealStream(l)) ? l : null));
-    const good = verified.filter(Boolean);
-    if (unique.length > MAX_VERIFY) {
-      console.log(`[Anime] verified ${MAX_VERIFY}/${unique.length} links (bounded pool; ${unique.length - MAX_VERIFY} unchecked)`);
+    const VERIFY_CONCURRENCY = 2;
+    const groups = new Map();
+    for (const l of unique.slice(0, MAX_VERIFY)) {
+        const key = l.label || l.url;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(l);
     }
+    const verifiedGroups = await mapLimit([...groups.values()], VERIFY_CONCURRENCY, async g => ((await isRealStream(g[0])) ? g : null));
+    const good = verifiedGroups.filter(Boolean).flat();
+
     console.log(`[Anime] "${title}" ${isTv ? `S${season}E${episode} (abs ${abs})` : 'movie'}: ${good.length}/${unique.length} links are real streams (${perSource.join(' ')})`);
 
     const tag = isTv ? ` S${season}E${episode}` : '';
@@ -446,6 +514,13 @@ async function getAnimeStreams(tmdbId, mediaType = 'movie', seasonNum = null, ep
         url: l.url,
         quality: l.quality || 'Auto',
         provider: 'anime',
+        // Every link here was already fetched and confirmed to be a real HLS manifest by isRealStream above
+        // (one probe per resolve group). This tells utils/linkHealth.js to trust that verdict instead of
+        // probing the same URL a second time: the duplicate probe doubled what anixo saw, and its anti-bot
+        // layer answered 403 under that load -- dropping every anime stream and tripping the breaker, which
+        // is the intermittent "anime has no streams" this provider was blamed for. Internal; stripped from
+        // the response before it is sent.
+        verified: true,
         // Carried so a client can label the episode without a second lookup.
         anilistId: al ? al.id : undefined,
         anilistEpisode: isTv ? abs : undefined,

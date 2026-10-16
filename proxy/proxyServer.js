@@ -3,10 +3,12 @@
 // Provides conditional route registration via enableProxy flag.
 
 const cors = require('cors');
-const fetch = require('node-fetch');
+const nodeFetch = require('node-fetch');
+const { Readable } = require('stream');
 const http = require('http');
 const https = require('https');
 const { baseUrlFromRequest } = require('../utils/publicUrl');
+const { dispatcherFor } = require('../utils/anixoAgent');
 
 // One shared, bounded connection pool per upstream scheme.
 //
@@ -67,7 +69,36 @@ const UPSTREAM_RETRY_TIMEOUT_MS = 10000;
 // made the total failure time four phases long. These only make startup snappier -- if they
 // time out, the main fetch still runs.
 const UPSTREAM_ACCEL_TIMEOUT_MS = 6000;
-const UPSTREAM_BODY_IDLE_TIMEOUT_MS = 25000; // no bytes from upstream for this long -> cut the client
+// How long the upstream may go silent mid-stream before we cut the client. Cutting is a guaranteed
+// fatal for native HLS (iPad/Safari): it does not resume a killed segment, it stops the show. So the
+// leash is long enough to ride out a throttling origin, and configurable for hosts that stall harder.
+const UPSTREAM_BODY_IDLE_TIMEOUT_MS = Number(process.env.PROXY_BODY_IDLE_TIMEOUT_MS) || 45000;
+
+// Transport through global fetch (undici) rather than node-fetch. node-fetch rides Node's
+// http/https stack, whose TLS fingerprint some upstreams (anixo/VidCloud) answer with a blanket
+// 403 -- the identical request over undici is served normally. The undici Response is adapted to
+// the node-fetch shape the call sites already use: ok/status/headers and text()/json()/arrayBuffer(),
+// plus a Node Readable `body` (undici hands back a web ReadableStream) so .pipe()/.on()/.destroy()
+// keep working unchanged.
+async function undiciCompatFetch(url, opts) {
+    const dispatcher = dispatcherFor(url);
+    const resp = await fetch(url, dispatcher ? { ...opts, dispatcher } : opts);
+    let nodeBody;
+    return {
+        ok: resp.ok,
+        status: resp.status,
+        statusText: resp.statusText,
+        url: resp.url,
+        headers: resp.headers,
+        text: () => resp.text(),
+        json: () => resp.json(),
+        arrayBuffer: () => resp.arrayBuffer(),
+        get body() {
+            if (nodeBody === undefined) nodeBody = resp.body ? Readable.fromWeb(resp.body) : null;
+            return nodeBody;
+        },
+    };
+}
 
 function upstreamFetch(url, opts = {}, { res = null, timeoutMs = UPSTREAM_HEADER_TIMEOUT_MS, agent = null } = {}) {
     const ac = new AbortController();
@@ -79,13 +110,32 @@ function upstreamFetch(url, opts = {}, { res = null, timeoutMs = UPSTREAM_HEADER
         res.on('close', onClose);
         detach = () => res.removeListener('close', onClose);
     }
-    return fetch(url, { ...opts, agent: agent || agentFor(url), signal: ac.signal })
-        .finally(() => { clearTimeout(timer); detach(); });
+    const request = undiciCompatFetch(url, { ...opts, signal: ac.signal });
+    return request.finally(() => { clearTimeout(timer); detach(); });
 }
 
 const CACHE_MAX_SIZE = 2000;
+// A count cap alone lets N concurrent viewers hold thousands of multi-MB segments for two hours. Cap
+// the cache by total bytes too, so memory has a hard ceiling no matter how many people are watching.
+const CACHE_MAX_BYTES = (Number(process.env.PROXY_SEGMENT_CACHE_MB) > 0 ? Number(process.env.PROXY_SEGMENT_CACHE_MB) : 256) * 1024 * 1024;
 const CACHE_EXPIRY_MS = 2 * 60 * 60 * 1000; // 2 hours
 const segmentCache = new Map();
+let segmentCacheBytes = 0;
+
+function deleteCachedSegment(url) {
+    const e = segmentCache.get(url);
+    if (!e) return;
+    segmentCacheBytes = Math.max(0, segmentCacheBytes - (e.data ? e.data.byteLength : 0));
+    segmentCache.delete(url);
+}
+
+function evictSegmentCacheToBudget() {
+    while (segmentCacheBytes > CACHE_MAX_BYTES && segmentCache.size) {
+        const oldest = segmentCache.keys().next().value;
+        if (oldest === undefined) break;
+        deleteCachedSegment(oldest);
+    }
+}
 
 // Segment prefetch, bounded.
 //
@@ -106,10 +156,13 @@ let realRequestsInFlight = 0;      // while > 0, prefetch workers stand down
 const openRangeClampMap = new Map();
 const OPEN_RANGE_CLAMP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // Progressive open-ended growth tracking: keeps expanding bytes=0- served window.
-const progressiveOpenMap = new Map(); // url -> { lastEnd }
+const progressiveOpenMap = new Map(); // url -> { lastEnd, ts }
+const PROGRESSIVE_OPEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const PROGRESSIVE_OPEN_MAX = 2000;
 // Tail prefetch cache: stores last N KB for quick tail range responses
 const tailPrefetchMap = new Map(); // url -> { data: Buffer, start: number, end: number, size: number, ts: number }
 const TAIL_PREFETCH_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const TAIL_PREFETCH_MAX = 500;
 
 function isCacheDisabled() {
     return process.env.DISABLE_CACHE === 'true';
@@ -118,13 +171,14 @@ function isCacheDisabled() {
 function cleanupCache() {
     const now = Date.now();
     for (const [url, entry] of segmentCache.entries()) {
-        if (now - entry.timestamp > CACHE_EXPIRY_MS) segmentCache.delete(url);
+        if (now - entry.timestamp > CACHE_EXPIRY_MS) deleteCachedSegment(url);
     }
     if (segmentCache.size > CACHE_MAX_SIZE) {
         const entries = Array.from(segmentCache.entries()).sort((a, b) => a[1].timestamp - b[1].timestamp);
         const toRemove = entries.slice(0, segmentCache.size - CACHE_MAX_SIZE);
-        toRemove.forEach(([u]) => segmentCache.delete(u));
+        toRemove.forEach(([u]) => deleteCachedSegment(u));
     }
+    evictSegmentCacheToBudget();
     return segmentCache.size;
 }
 setInterval(cleanupCache, 30 * 60 * 1000).unref();
@@ -142,21 +196,85 @@ function cleanupTailPrefetch() {
     for (const [url, entry] of tailPrefetchMap.entries()) {
         if (now - entry.ts > TAIL_PREFETCH_TTL_MS) tailPrefetchMap.delete(url);
     }
+    if (tailPrefetchMap.size > TAIL_PREFETCH_MAX) {
+        const excess = tailPrefetchMap.size - TAIL_PREFETCH_MAX;
+        let i = 0;
+        for (const url of tailPrefetchMap.keys()) { if (i++ >= excess) break; tailPrefetchMap.delete(url); }
+    }
 }
 setInterval(cleanupTailPrefetch, 15 * 60 * 1000).unref();
+
+// progressiveOpenMap had no cleanup at all: every unique segment URL that asked for bytes=0- added an
+// entry for the life of the process. Harmless for one viewer, a slow leak with several.
+function cleanupProgressiveOpen() {
+    const now = Date.now();
+    for (const [url, entry] of progressiveOpenMap.entries()) {
+        if (!entry || now - (entry.ts || 0) > PROGRESSIVE_OPEN_TTL_MS) progressiveOpenMap.delete(url);
+    }
+    if (progressiveOpenMap.size > PROGRESSIVE_OPEN_MAX) {
+        const excess = progressiveOpenMap.size - PROGRESSIVE_OPEN_MAX;
+        let i = 0;
+        for (const url of progressiveOpenMap.keys()) { if (i++ >= excess) break; progressiveOpenMap.delete(url); }
+    }
+}
+setInterval(cleanupProgressiveOpen, 15 * 60 * 1000).unref();
+
+// Last-known-good playlists. Native HLS (iPad/Safari) re-reads the media playlist during playback --
+// continuously when a playlist lacks #EXT-X-ENDLIST, which many providers omit. Before this, every
+// reload re-hit upstream and any transient failure (timeout, 429, 5xx) was answered with a JSON body,
+// which native HLS cannot parse: one blip and the show stopped mid-playback. We now keep the last
+// rewritten playlist and serve it while upstream is briefly unavailable (stale-while-error).
+const playlistCache = new Map(); // key -> { text, ts }
+const PLAYLIST_FRESH_MS = 3000;             // serve from memory without touching upstream for this long
+const PLAYLIST_STALE_MS = 10 * 60 * 1000;   // ...but keep the last good copy this long to survive an outage
+const PLAYLIST_CACHE_MAX = 500;
+
+function getFreshPlaylist(key) {
+    const e = playlistCache.get(key);
+    if (!e) return null;
+    if (Date.now() - e.ts > PLAYLIST_FRESH_MS) return null;
+    return e.text;
+}
+function getStalePlaylist(key) {
+    const e = playlistCache.get(key);
+    if (!e) return null;
+    if (Date.now() - e.ts > PLAYLIST_STALE_MS) { playlistCache.delete(key); return null; }
+    return e.text;
+}
+function putPlaylist(key, text) {
+    if (playlistCache.size >= PLAYLIST_CACHE_MAX) {
+        const oldest = playlistCache.keys().next().value;
+        if (oldest !== undefined) playlistCache.delete(oldest);
+    }
+    playlistCache.set(key, { text, ts: Date.now() });
+}
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, e] of playlistCache.entries()) {
+        if (now - e.ts > PLAYLIST_STALE_MS) playlistCache.delete(k);
+    }
+}, 15 * 60 * 1000).unref();
+
+function sendPlaylist(res, text) {
+    res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    return res.send(text);
+}
 
 function getCachedSegment(url) {
     if (isCacheDisabled()) return null;
     const e = segmentCache.get(url);
     if (!e) return null;
-    if (Date.now() - e.timestamp > CACHE_EXPIRY_MS) { segmentCache.delete(url); return null; }
+    if (Date.now() - e.timestamp > CACHE_EXPIRY_MS) { deleteCachedSegment(url); return null; }
     return e;
 }
 
 // Pull one prefetched segment. Skipped entirely while a real request is in flight, and paused between
 // fetches, so background work can never be what delays the video the user actually asked for.
 async function prefetchSegment(url, headers) {
-    if (isCacheDisabled() || segmentCache.size >= CACHE_MAX_SIZE) return;
+    if (isCacheDisabled()) return;
+    if (segmentCache.size >= CACHE_MAX_SIZE || segmentCacheBytes >= CACHE_MAX_BYTES) return;
     const existing = segmentCache.get(url);
     if (existing && Date.now() - existing.timestamp <= CACHE_EXPIRY_MS) return;
     try {
@@ -166,7 +284,10 @@ async function prefetchSegment(url, headers) {
         const data = new Uint8Array(await resp.arrayBuffer());
         const responseHeaders = {};
         resp.headers.forEach((v, k) => responseHeaders[k] = v);
+        if (segmentCache.has(url)) deleteCachedSegment(url);
         segmentCache.set(url, { data, headers: responseHeaders, timestamp: Date.now() });
+        segmentCacheBytes += data.byteLength;
+        evictSegmentCacheToBudget();
     } catch (_e) { /* ignore */ }
 }
 
@@ -215,6 +336,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+// One structured line per proxy failure/mid-stream cut, so a "it randomly stopped" report can be
+// matched to a host/phase instead of guessed at. Never throws.
+function safeHost(u) { try { return new URL(u).host; } catch { return '?'; } }
+function logProxyFailure(route, info) {
+    try {
+        console.log(`[proxy-failure] ${JSON.stringify({ route, at: new Date().toISOString(), rssMB: Math.round(process.memoryUsage().rss / 1048576), ...info })}`);
+    } catch (_e) { /* logging must never throw */ }
+}
 
 function inferContentType(upstreamCT, targetUrl) {
     const bad = !upstreamCT || /application\/octet-stream/i.test(upstreamCT) || /application\/(x-)?zip/i.test(upstreamCT);
@@ -311,9 +441,20 @@ function createProxyRoutes(app) {
     // m3u8 playlist proxy
     app.get('/m3u8-proxy', cors(), async (req, res) => {
         const targetUrl = req.query.url; if (!targetUrl) return res.status(400).json({ error: 'URL parameter required' });
+        const debug = req.query.debug === '1';
         let headers = {};
         try { headers = JSON.parse(req.query.headers || '{}'); } catch {
             // Ignore URL parsing errors
+        }
+        // Segment URLs written back into the playlist must point at the public host this request
+        // arrived on; see utils/publicUrl.js. Previously `${x-forwarded-proto}://${host}`.
+        const baseProxyUrl = baseUrlFromRequest(req);
+        const cacheKey = `${baseProxyUrl}\n${targetUrl}`;
+        // Fast path: a burst of native-HLS playlist reloads is served from the last copy without
+        // stampeding upstream, and that copy is what saves playback if upstream then blips.
+        if (!isCacheDisabled()) {
+            const fresh = getFreshPlaylist(cacheKey);
+            if (fresh) { if (debug) console.log('[m3u8-proxy] fresh cache hit'); return sendPlaylist(res, fresh); }
         }
         try {
             let response;
@@ -324,17 +465,31 @@ function createProxyRoutes(app) {
                 if (debug) console.log('[m3u8-proxy] upstream attempt failed, retrying fresh:', firstErr.message);
                 response = await upstreamFetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } }, { res, agent: freshAgentFor(targetUrl), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
             }
-            if (!response.ok) return res.status(response.status).json({ error: `M3U8 fetch failed: ${response.status}` });
+            if (!response.ok) {
+                // A playlist request must never receive JSON: native HLS treats a non-playlist body as
+                // unplayable and stops. Serve the last good copy, else a plain-text retryable error.
+                const stale = isCacheDisabled() ? null : getStalePlaylist(cacheKey);
+                if (stale) {
+                    logProxyFailure('m3u8-proxy', { host: safeHost(targetUrl), phase: 'upstream', status: response.status, served: 'stale' });
+                    return sendPlaylist(res, stale);
+                }
+                logProxyFailure('m3u8-proxy', { host: safeHost(targetUrl), phase: 'upstream', status: response.status, served: 'error' });
+                return res.status(502).type('text/plain').set('Retry-After', '2').send(`playlist upstream error ${response.status}`);
+            }
             const text = await response.text();
-            // Segment URLs written back into the playlist must point at the public host this request
-            // arrived on; see utils/publicUrl.js. Previously `${x-forwarded-proto}://${host}`.
-            const baseProxyUrl = baseUrlFromRequest(req);
             const rewritten = rewriteM3u8(text, targetUrl, baseProxyUrl, headers);
-            res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.send(rewritten);
-        } catch (e) { res.status(500).json({ error: e.message }); }
+            if (!isCacheDisabled()) putPlaylist(cacheKey, rewritten);
+            sendPlaylist(res, rewritten);
+        } catch (e) {
+            const stale = isCacheDisabled() ? null : getStalePlaylist(cacheKey);
+            if (stale) {
+                logProxyFailure('m3u8-proxy', { host: safeHost(targetUrl), phase: 'fetch', error: e.message, served: 'stale' });
+                return sendPlaylist(res, stale);
+            }
+            logProxyFailure('m3u8-proxy', { host: safeHost(targetUrl), phase: 'fetch', error: e.message, served: 'error' });
+            if (!res.headersSent) res.status(502).type('text/plain').set('Retry-After', '2').send('playlist proxy error');
+            else try { res.destroy(); } catch (_e) { /* ignore */ }
+        }
     });
 
     // ts / key segment proxy
@@ -387,6 +542,7 @@ function createProxyRoutes(app) {
                 headers.Range = newRange;
                 effectiveRange = newRange;
                 prog.lastEnd = nextEnd;
+                prog.ts = now;
                 progressiveOpenMap.set(targetUrl, prog);
                 appliedClamp = true; // reuse flag for logging
                 if (debug) console.log('[ts-proxy] progressiveOpen expand', { prevEnd, nextEnd, increment: openChunkKB * 1024 });
@@ -552,8 +708,26 @@ function createProxyRoutes(app) {
                 resp = await upstreamFetch(targetUrl, upstreamOptions, { res, agent: freshAgentFor(targetUrl), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
             }
             if (!resp.ok && resp.status !== 206) {
-                if (debug) console.log('[ts-proxy] upstream error', resp.status);
-                return res.status(resp.status).json({ error: `TS fetch failed: ${resp.status}` });
+                // One more attempt on a fresh socket for transient upstream statuses. Mid-show these
+                // are the single biggest cause of a segment failing on a native-HLS client, which then
+                // stops the whole show instead of retrying.
+                const retryable = resp.status === 429 || resp.status === 500 || resp.status === 502 || resp.status === 503 || resp.status === 504;
+                if (retryable && !res.destroyed && !res.headersSent && !res.writableEnded) {
+                    if (debug) console.log('[ts-proxy] upstream error, retrying once more', resp.status);
+                    try { resp.body && resp.body.destroy(); } catch (_e) { /* ignore */ }
+                    await sleep(300);
+                    try {
+                        resp = await upstreamFetch(targetUrl, upstreamOptions, { res, agent: freshAgentFor(targetUrl), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
+                    } catch (retryErr) {
+                        if (debug) console.log('[ts-proxy] retry threw', retryErr.message);
+                        resp = null;
+                    }
+                }
+                if (!resp || (!resp.ok && resp.status !== 206)) {
+                    const status = resp ? resp.status : 502;
+                    logProxyFailure('ts-proxy', { host: safeHost(targetUrl), phase: 'upstream', status });
+                    return res.status(status).type('text/plain').set('Retry-After', '2').send(`TS fetch failed: ${status}`);
+                }
             }
             // Forward partial content status when range used
             if (effectiveRange && resp.status === 206 && !force200) { res.status(206); if (debug) console.log('[ts-proxy] forwarding 206', { appliedClamp }); }
@@ -599,6 +773,7 @@ function createProxyRoutes(app) {
                 if (idleTimer) clearTimeout(idleTimer);
                 idleTimer = setTimeout(() => {
                     if (debug) console.log('[ts-proxy] upstream idle mid-stream, cutting client');
+                    logProxyFailure('ts-proxy', { host: safeHost(targetUrl), phase: 'body-idle', idleMs: UPSTREAM_BODY_IDLE_TIMEOUT_MS });
                     try { resp.body.destroy(); } catch (_e) { /* ignore */ }
                     res.destroy();
                 }, UPSTREAM_BODY_IDLE_TIMEOUT_MS);
@@ -606,6 +781,7 @@ function createProxyRoutes(app) {
             res.on('close', () => { if (idleTimer) clearTimeout(idleTimer); try { resp.body.destroy(); } catch (_e) { /* ignore */ } });
             resp.body.on('error', (err) => {
                 if (debug) console.log('[ts-proxy] upstream body error', err.message);
+                logProxyFailure('ts-proxy', { host: safeHost(targetUrl), phase: 'body', error: err.message });
                 if (idleTimer) clearTimeout(idleTimer);
                 try { res.destroy(); } catch (_e) { /* ignore */ }
             });
@@ -614,7 +790,8 @@ function createProxyRoutes(app) {
             resp.body.pipe(res);
         } catch (e) {
             if (debug) console.log('[ts-proxy] exception', e.message);
-            if (!res.headersSent) res.status(500).json({ error: e.message });
+            logProxyFailure('ts-proxy', { host: safeHost(targetUrl), phase: 'exception', error: e.message });
+            if (!res.headersSent) res.status(502).type('text/plain').set('Retry-After', '2').send('segment proxy error');
             else try { res.destroy(); } catch (_e) { /* ignore */ }
         }
     });
@@ -654,6 +831,9 @@ function processStreamsForProxy(streams, serverUrl) {
         } catch {
             // Ignore errors
         }
+        // Play anixo directly (no proxy relay) to avoid IP-bound token coupling and the latency
+        // that ages its short-lived tickets. Browser fetch with a real UA works against anixo and
+        // the API still classifies it correctly.
         // Force specific hosts through ts-proxy (direct file style) even without extension
         if (host.includes('pixeldrain.') || host === 'video-downloads.googleusercontent.com') {
             return { ...s, url: `${serverUrl}/ts-proxy?url=${encodeURIComponent(original)}${hParam}` };

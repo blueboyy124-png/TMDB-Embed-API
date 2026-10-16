@@ -892,6 +892,9 @@ async function aggregateStreams(req, res, onEvent) {
     // Label every stream with its container and whether a browser/Roku can actually decode it. Last, so it
     // runs on the final URL after proxy rewriting -- otherwise it would classify the proxy wrapper, not the file.
     streams = streams.map(classifyForPlayback);
+    // `verified` is an internal "this provider already fetched the link" hint (see providers/anime.js and
+    // utils/linkHealth.js); it is not part of the API shape, so it never reaches a client.
+    streams = streams.map(s => { if (s && s.verified !== undefined) { const { verified, ...rest } = s; return rest; } return s; });
 
     // Best quality actually present in the returned streams, so "did I get 4K?" is answerable without
 // eyeballing every row. Reported after link-health filtering, so it reflects something playable.
@@ -1095,6 +1098,8 @@ app.get('/api/streams/:provider/:type/:tmdbId', async (req,res) => {
     // Label every stream with its container and whether a browser/Roku can actually decode it. Last, so it
     // runs on the final URL after proxy rewriting -- otherwise it would classify the proxy wrapper, not the file.
     streams = streams.map(classifyForPlayback);
+    // Same internal-hint strip as the aggregate route; see there for why.
+    streams = streams.map(s => { if (s && s.verified !== undefined) { const { verified, ...rest } = s; return rest; } return s; });
     res.json({
       success:true, provider: prov.name, tmdbId, imdbId, count: streams.length, providerTimings,
       tagCounts: tagCounts(streams),

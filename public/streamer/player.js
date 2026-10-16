@@ -17,8 +17,13 @@
   const STALL_MIN_RATE = 0.35;        // < 0.35x real time == starved
   const STALL_COOLDOWN_MS = 60000;    // after an offer, stay quiet for a while
 
-  function looksHls(url) {
-    return /\.m3u8(\?|$)/i.test(url) || /m3u8-proxy/i.test(url);
+  /** `hint` is the stream row's container when the API knows it (true = HLS, false = progressive). */
+  function looksHls(url, hint) {
+    if (hint === true) return true;
+    if (hint === false) return false;
+    if (/\.m3u8(\?|$)/i.test(url) || /m3u8-proxy/i.test(url)) return true;
+    // Hosts like anixo serve playlists from extensionless paths (/api/stream/m3u8?t=...).
+    return /m3u8/i.test(url) && !/ts-proxy/i.test(url);
   }
 
   function bufferedEnd(video) {
@@ -41,10 +46,21 @@
       this.offeredAt = 0;
       this.offerOpen = false;
       this.fatalRecoveries = 0;
+      this.url = null;
+      this.usingNative = false;
+      this.playedOnce = false;
+      this.lastPos = 0;
+      this.nativeRecoveries = 0;
       this._tick = setInterval(() => this._checkStall(), 1000);
       ['waiting', 'stalled'].forEach((ev) => video.addEventListener(ev, () => this._markStarved()));
       ['playing', 'canplay', 'seeked'].forEach((ev) => video.addEventListener(ev, () => this._maybeRecovered()));
       video.addEventListener('emptied', () => this._reset());
+      video.addEventListener('playing', () => { this.fatalRecoveries = 0; this.nativeRecoveries = 0; });
+      video.addEventListener('timeupdate', () => {
+        this.lastPos = video.currentTime || 0;
+        if (this.lastPos > 0.5) this.playedOnce = true;
+      });
+      video.addEventListener('error', () => this._onNativeError());
     }
 
     on(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); return this; }
@@ -54,13 +70,18 @@
     get usingHls() { return !!this.hls; }
 
     load(url, opts) {
-      const { startAt = 0, autoplay = true } = opts || {};
+      const { startAt = 0, autoplay = true, hls: hlsHint } = opts || {};
       const v = this.video;
       const gen = ++this.generation;
       this._teardown();
       this._reset();
       this.offeredAt = 0;
       this.fatalRecoveries = 0;
+      this.url = url;
+      this.usingNative = false;
+      this.playedOnce = startAt > 0.5;
+      this.lastPos = startAt || 0;
+      this.nativeRecoveries = 0;
 
       const seekAndPlay = () => {
         if (gen !== this.generation) return;
@@ -78,35 +99,98 @@
       // without a reliable pipeline, so only trust native on Safari (or when hls.js is unavailable).
       const useNative = nativeHls && (isSafari || !hlsJs);
 
-      if (looksHls(url) && !useNative) {
+      if (looksHls(url, hlsHint) && !useNative) {
         if (!hlsJs) { this.emit('fatal', { reason: 'hls-unsupported' }); return; }
         const hls = new window.Hls({ enableWorker: true, lowLatencyMode: false, maxBufferLength: 60, backBufferLength: 30 });
         this.hls = hls;
-        hls.on(window.Hls.Events.MANIFEST_PARSED, seekAndPlay);
+        hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+          if (gen !== this.generation) return;
+          if (!this._codecsOk(hls)) { this.emit('fatal', { reason: 'unsupported-codec' }); return; }
+          seekAndPlay();
+        });
         hls.on(window.Hls.Events.AUDIO_TRACKS_UPDATED, () => this.selectEnglishAudio());
+        hls.subtitleDisplay = false;   // captions.js draws the cues itself
+        hls.on(window.Hls.Events.SUBTITLE_TRACKS_UPDATED, () => this.emit('subtitletracks'));
         hls.on(window.Hls.Events.ERROR, (_e, data) => this._onHlsError(hls, data));
         hls.loadSource(url);
         hls.attachMedia(v);
       } else {
+        this.usingNative = true;
         v.addEventListener('loadedmetadata', seekAndPlay, { once: true });
-        v.addEventListener('error', () => {
-          if (gen === this.generation) this.emit('fatal', { reason: 'media-error', code: v.error && v.error.code });
-        }, { once: true });
         v.src = url;
         v.load();
       }
     }
 
+    /** False when every rendition uses a codec this browser can't decode (typically HEVC/H.265). */
+    _codecsOk(hls) {
+      const levels = hls.levels || [];
+      if (!levels.length || typeof window.MediaSource === 'undefined') return true;
+      return levels.some((l) => {
+        const c = l.videoCodec;
+        if (!c) return true;
+        try { return window.MediaSource.isTypeSupported(`video/mp4;codecs="${c}"`); } catch (_) { return true; }
+      });
+    }
+
     _onHlsError(hls, data) {
       if (hls !== this.hls || !data || !data.fatal) return;
-      // Try cheap in-place recovery first, then OFFER (never auto-switch).
-      if (this.fatalRecoveries < 2) {
+      const status = data.response && data.response.code;
+      // 401/403/404/410 mean the link itself is dead or expired: retrying the same URL can't help,
+      // so hand it to the app immediately (it re-fetches fresh links for the same source).
+      const gone = status === 401 || status === 403 || status === 404 || status === 410;
+      // Before the first frame a dead/unreachable source should fail fast so the app can try the next one;
+      // once playing, a network blip is worth the longer backoff.
+      const maxRetries = this.playedOnce ? 3 : 1;
+      if (!gone && this.fatalRecoveries < maxRetries) {
         this.fatalRecoveries++;
-        if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) { hls.startLoad(); return; }
+        if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+          // startLoad() does not re-request a master playlist that failed to load: reload the source instead.
+          const manifestFail = /^manifest/i.test(data.details || '');
+          if (manifestFail && !this.playedOnce) { this.emit('fatal', { reason: data.details, status, expired: false }); return; }
+          const wait = 800 * Math.pow(2, this.fatalRecoveries - 1);       // 0.8s, 1.6s, 3.2s
+          setTimeout(() => { if (hls === this.hls) { try { manifestFail ? hls.loadSource(this.url) : hls.startLoad(); } catch (_) { /* noop */ } } }, wait);
+          return;
+        }
         if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) { hls.recoverMediaError(); return; }
       }
-      this.emit('fatal', { reason: data.details || 'hls-fatal' });
+      this.emit('fatal', { reason: data.details || 'hls-fatal', status, expired: gone });
     }
+
+    // Native playback (progressive files, Safari's own HLS) has no hls.js to retry with: when the element
+    // errors, playback is simply over. Reload the same source at the last position a couple of times
+    // (a transient blip), then hand it to the app, which re-fetches fresh links or offers another source.
+    _onNativeError() {
+      if (!this.usingNative || !this.url) return;
+      if (this._tryNativeRecover()) return;
+      const v = this.video;
+      this.emit('fatal', { reason: 'media-error', code: v.error && v.error.code });
+    }
+
+    _tryNativeRecover() {
+      if (!this.playedOnce && this.lastPos < 1) return false;   // never painted: the first-frame path owns that
+      if (this.nativeRecoveries >= 2) return false;
+      const v = this.video;
+      const pos = (v.currentTime && isFinite(v.currentTime)) ? v.currentTime : this.lastPos;
+      const gen = this.generation;
+      const url = this.url;
+      const attempt = ++this.nativeRecoveries;
+      this.emit('recovering', { attempt, position: pos });
+      const onMeta = () => {
+        if (gen !== this.generation) return;
+        try { if (pos > 0) v.currentTime = pos; } catch (_) { /* continue from 0 */ }
+        v.play().catch(() => { });
+      };
+      setTimeout(() => {
+        if (gen !== this.generation) return;
+        v.addEventListener('loadedmetadata', onMeta, { once: true });
+        try { v.src = url; v.load(); } catch (_) { /* ignore */ }
+      }, 800 * attempt);
+      return true;
+    }
+
+    /** Nudge a stalled loader (after the tab wakes or the network returns). */
+    kick() { if (this.hls) { try { this.hls.startLoad(-1); } catch (_) { /* noop */ } } }
 
     selectEnglishAudio() {
       const isEn = (t) => /^en/i.test(t.lang || t.language || '') || /english/i.test(t.name || t.label || '');
@@ -127,6 +211,7 @@
 
     stop() {
       this.generation++;
+      this.usingNative = false;
       this._teardown();
       const v = this.video;
       v.pause();

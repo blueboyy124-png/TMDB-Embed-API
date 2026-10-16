@@ -16,16 +16,18 @@
  *  2. A provider is only switched off once it is *proven* dead by a sample -- a provider that is merely
  *     slow, or having one bad link, must never be disabled.
  *
- * Only direct-file links are probed. An HLS manifest is fetched fresh by the proxy on every playback
- * anyway, so a cached verdict about one would be stale, and probing it buys nothing.
+ * Probes use global fetch, with the stream's own headers and a browser User-Agent, rather than Node's
+ * http client: anixo/vidcloud answer Node http a blanket 403 while accepting fetch, which used to mark
+ * every live anime manifest dead. See probe() below.
  */
 const { BoundedTtlCache } = require('./boundedCache');
-const http = require('http');
-const https = require('https');
 const { URL } = require('url');
 
 const PROBE_TIMEOUT_MS = Number(process.env.LINK_PROBE_TIMEOUT_MS) || 6000;
 const PROBE_CONCURRENCY = Number(process.env.LINK_PROBE_CONCURRENCY) || 8;
+// A browser User-Agent, sent only when the stream does not carry its own. Some hosts answer 403 to a
+// request with no UA (or a bot-looking one) even when the link is perfectly alive.
+const PROBE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 // Deliberately short. A link that answers once is not thereby good forever: Vidlink alternates between
 // 200 and 429, so a long "alive" TTL freezes a single lucky moment and then hands out dead links for the
 // rest of the half hour. Ten minutes still saves the repeated probe on a title you are browsing.
@@ -82,44 +84,37 @@ function trippedProviders() {
  * One probe. HEAD costs no body and reveals 403/429, but some upstreams reject HEAD with 405, which would
  * read as "dead" for a perfectly good link -- so that is retried with a tiny ranged GET first.
  */
-function probe(url) {
-  return new Promise((resolve) => {
-    let parsed;
-    try { parsed = new URL(url); } catch { resolve({ ok: false, reason: 'unparseable' }); return; }
-    const mod = parsed.protocol === 'https:' ? https : http;
-    const req = mod.request(url, { method: 'HEAD', timeout: PROBE_TIMEOUT_MS }, (res) => {
-      res.destroy();
-      const code = res.statusCode || 0;
-      if (code >= 200 && code < 400) { resolve({ ok: true, code }); return; }
-      if (code === 405 || code === 501) { retryGet(parsed, mod, resolve); return; }
-      resolve({ ok: false, code, reason: `HTTP ${code}` });
-    });
-    req.on('timeout', () => { req.destroy(); resolve({ ok: false, reason: 'timeout' }); });
-    req.on('error', (e) => resolve({ ok: false, reason: e.message }));
-    req.end();
-  });
-}
-
-function retryGet(parsed, mod, resolve) {
+// One ranged GET, not a HEAD. Two reasons, both learned the hard way:
+//   - plenty of CDNs answer HEAD with 405 (and some with 403), so a HEAD-first probe had to fall back
+//     to a GET anyway;
+//   - anixo/vidcloud fingerprint Node's http client and answer it a blanket 403 while accepting fetch,
+//     which marked every live anixo manifest dead and silently dropped the whole anime provider.
+// Global fetch is also what the providers use to resolve these links, so the probe now speaks the same
+// client the stream will actually be fetched with. A browser UA is sent, plus the stream's own headers
+// (a Referer, usually), and the body is never read -- a 2-byte Range and an immediate cancel.
+async function probe(url, headers) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return { ok: false, reason: 'unparseable' }; }
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), PROBE_TIMEOUT_MS);
   try {
-    const req = mod.request(parsed, {
-      method: 'GET', timeout: PROBE_TIMEOUT_MS, headers: { Range: 'bytes=0-1' }
-    }, (res) => {
-      res.destroy();
-      const code = res.statusCode || 0;
-      resolve(code >= 200 && code < 400 ? { ok: true, code } : { ok: false, code, reason: `HTTP ${code}` });
+    const r = await fetch(parsed, {
+      headers: { 'User-Agent': PROBE_UA, ...(headers || {}), Range: 'bytes=0-1' },
+      redirect: 'follow',
+      signal: ctl.signal
     });
-    req.on('timeout', () => { req.destroy(); resolve({ ok: false, reason: 'timeout' }); });
-    req.on('error', (e) => resolve({ ok: false, reason: e.message }));
-    req.end();
+    const code = r.status;
+    try { await r.body?.cancel(); } catch (_) { /* body not needed; free the socket */ }
+    if (code >= 200 && code < 400) return { ok: true, code };
+    return { ok: false, code, reason: `HTTP ${code}` };
   } catch (e) {
-    resolve({ ok: false, reason: e.message });
-  }
+    return { ok: false, reason: e && e.name === 'AbortError' ? 'timeout' : (e && e.message) || 'error' };
+  } finally { clearTimeout(timer); }
 }
 
 /**
  * Drops streams whose link is known-dead, and returns the survivors plus a tally.
- * Only direct-file streams are probed; manifests are never probed and are always kept.
+ * Every stream is probed, manifests included.
  */
 async function filterDeadLinks(streams, { probe: doProbe = true } = {}) {
   if (!Array.isArray(streams) || !streams.length) {
@@ -128,10 +123,15 @@ async function filterDeadLinks(streams, { probe: doProbe = true } = {}) {
 
   const known = new Map();          // stream index -> verdict
   let cached = 0;
-  let toProbe = [];
+  const toProbe = [];
 
   streams.forEach((s, i) => {
     if (!s) return;
+    // A provider that marks a stream `verified` has already fetched it and confirmed it resolves -- the
+    // anime provider does exactly what this probe does, one request per resolve group. Probing it again is
+    // duplicate load, and against anixo that duplicate was enough to trip its anti-bot 403 and drop every
+    // anime link (and then feed the breaker). Trust the provider's own verdict instead.
+    if (s.verified === true) { known.set(i, { alive: true, verified: true }); return; }
     const hit = verdictCache.get(s.url);
     if (hit && isFresh(hit)) { known.set(i, hit); cached++; }
     else toProbe.push({ idx: i, stream: s });
@@ -143,7 +143,7 @@ async function filterDeadLinks(streams, { probe: doProbe = true } = {}) {
     const workers = new Array(Math.min(PROBE_CONCURRENCY, toProbe.length)).fill(0).map(async () => {
       while (next < toProbe.length) {
         const job = toProbe[next++];
-        const result = await probe(job.stream.url);
+        const result = await probe(job.stream.url, job.stream.headers);
         const entry = { alive: result.ok, at: Date.now(), code: result.code, reason: result.reason };
         // Only successes are cached. A dead link usually RECOVERS -- a signature expires, a rate limit
         // passes -- and caching that as permanent is how a good provider stays switched off for good.
@@ -162,8 +162,10 @@ async function filterDeadLinks(streams, { probe: doProbe = true } = {}) {
   streams.forEach((s, i) => {
     if (!s) { alive.push(s); return; }
     const provider = s.provider || '?';
-    checked++;
     const v = known.get(i);
+    // Provider-verified links are kept unconditionally and were never probed, so they are not "checked".
+    if (v && v.verified) { alive.push(s); return; }
+    checked++;
     if (v && v.alive === false) {
       dead++;
       if (!deadByProvider[provider]) deadByProvider[provider] = [];

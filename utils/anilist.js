@@ -308,6 +308,89 @@ async function getForTmdb(type, tmdbId) {
   return p;
 }
 
+// ---- Absolute episode -> the AniList entry that actually holds it -------------------------------
+//
+// Anime sources number episodes flat across a whole franchise ("absolute" numbering: AoT S3E1 is
+// episode 38), but AniList splits most franchises into ONE ENTRY PER COUR, each restarting at episode
+// 1. TMDB matches the show to the first cour ("Shingeki no Kyojin", 25 episodes), and asking that
+// entry for absolute episode 38 is exactly why Attack on Titan S2 onward contributed nothing: the
+// entry has no episode 38, so the source has no stream and answers empty.
+//
+// This walks the SEQUEL chain (back to the PREQUEL that starts it, then forward), accumulates each
+// entry's episode count off the SAME flat numbering the sources use, and returns the entry that holds
+// the requested episode together with the episode number WITHIN it (abs 38 -> entry 99147, episode 1).
+// Returns null when it cannot be worked out (unknown episode counts, no chain), so the caller falls
+// back to the matched series entry, which is already correct for single-entry franchises (One Piece).
+const REL_FIELDS = `
+  id idMal format episodes title { romaji }
+  startDate { year }
+  relations { edges { relationType node { id idMal format episodes title { romaji } startDate { year } } } }
+`;
+// Formats that are real story installments in the flat numbering. Movies and music videos are not part
+// of a series' episode count, so they are excluded; SPECIal is included because the final AoT chapters
+// are listed that way and TMDB counts them.
+const CHAIN_FORMATS = ['TV', 'TV_SHORT', 'ONA', 'SPECIAL'];
+const relCache = new BoundedTtlCache(2000);
+const relInflight = new Map();
+
+async function getWithRelations(id) {
+  const key = `rel:${id}`;
+  const hit = relCache.get(key);
+  if (fresh(hit)) return hit.data;
+  if (relInflight.has(key)) return relInflight.get(key);
+  const p = (async () => {
+    try {
+      const data = await gql(`query($id:Int){Media(id:$id,type:ANIME){${REL_FIELDS}}}`, { id });
+      return (data && data.Media) || null;
+    } catch { return null; }
+  })().then(v => { relCache.set(key, { data: v, ts: Date.now() }); relInflight.delete(key); return v; });
+  relInflight.set(key, p);
+  return p;
+}
+
+function isChainEntry(n) { return !!n && CHAIN_FORMATS.includes(n.format); }
+
+// The next story installment. A franchise can list several SEQUEL edges (alternative versions,
+// specials); the one that starts earliest is the immediate next cour.
+function sequelOf(media) {
+  const edges = (media && media.relations && media.relations.edges) || [];
+  const nodes = edges.filter(e => e.relationType === 'SEQUEL' && isChainEntry(e.node)).map(e => e.node);
+  if (!nodes.length) return null;
+  nodes.sort((a, b) => ((a.startDate && a.startDate.year) || 9999) - ((b.startDate && b.startDate.year) || 9999));
+  return nodes[0];
+}
+
+// Returns { id, idMal, episode, episodes, title } for the entry containing the absolute episode, or
+// null when it cannot be determined.
+//
+// Anchor at the matched entry and walk FORWARD only. TMDB either splits a franchise into separate shows
+// -- then every show's absolute number restarts at 1 and the matched entry is already correct -- or
+// folds it into seasons of one show, in which case the first cour is what matches and the absolute
+// number lives in a later cour. Walking BACKWARD was tried and removed: franchises commonly list a
+// side-story PREQUEL (One Piece -> "MONSTERS"), and following it re-based episode 1 onto that special.
+async function resolveEpisodeEntry(media, absoluteEpisode) {
+  const abs = Number(absoluteEpisode);
+  if (!media || !media.id || !Number.isFinite(abs) || abs < 1) return null;
+
+  let cur = await getWithRelations(media.id);
+  let start = 1;
+  const seen = new Set();
+  for (let i = 0; i < 50; i++) {
+    if (!cur || seen.has(cur.id)) break;
+    seen.add(cur.id);
+    const count = Number(cur.episodes) || 0;
+    if (!count) return null;   // an unknown count makes every later offset a guess; caller falls back
+    if (abs < start + count) {
+      return { id: cur.id, idMal: cur.idMal || null, episode: abs - start + 1, episodes: count, title: (cur.title && cur.title.romaji) || null };
+    }
+    start += count;
+    const nxt = sequelOf(cur);
+    if (!nxt) break;
+    cur = await getWithRelations(nxt.id);
+  }
+  return null;
+}
+
 // AniList has no per-episode title table, so this is deliberately thin: it carries the series-level facts a
 // client wants beside an episode. Actual episode names come from TMDB (utils/metadata.js), which has them.
 // Present so the response shape stays stable for clients either way.
@@ -326,10 +409,10 @@ async function getEpisodeContext(media, season, episode) {
 // Warm the cache without awaiting: used alongside a stream request so metadata is usually ready already.
 function prefetch(type, tmdbId) { getForTmdb(type, tmdbId).catch(() => {}); }
 
-function clear() { cache.clear(); inflight.clear(); }
+function clear() { cache.clear(); inflight.clear(); relCache.clear(); relInflight.clear(); }
 
 module.exports = {
-  getForTmdb, getMediaById, getEpisodeContext, findByTitles, prefetch, clear,
+  getForTmdb, getMediaById, getEpisodeContext, findByTitles, prefetch, clear, resolveEpisodeEntry,
   // exported for tests
-  _internal: { normalizeTitle, titleScore, scoreCandidate }
+  _internal: { normalizeTitle, titleScore, scoreCandidate, sequelOf, isChainEntry }
 };

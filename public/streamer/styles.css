@@ -291,6 +291,31 @@ main { min-height: 100vh; outline: none; }
 .big-play { pointer-events: auto; width: 96px; height: 96px; border-radius: 50%; background: rgba(255,255,255,.95); color: #000; display: grid; place-items: center; transition: transform .2s var(--ease); }
 .big-play .ic { width: 40px; height: 40px; margin-left: 5px; }
 .big-play:hover { transform: scale(1.06); }
+/* Loading screen: title artwork, slow push-in, honest progress. Sits under the top/bottom chrome. */
+.p-top, .p-bottom { z-index: 4; }
+.p-loader { position: absolute; inset: 0; z-index: 1; background: #000; display: grid; align-items: end; overflow: hidden; animation: plIn .45s var(--ease) both; }
+.pl-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .55; transform: scale(1.04); animation: plPush 24s linear forwards; }
+.pl-shade { position: absolute; inset: 0; background: linear-gradient(0deg, #000 4%, rgba(0,0,0,.55) 42%, rgba(0,0,0,.25) 100%), radial-gradient(120% 80% at 0% 100%, rgba(0,0,0,.85), transparent 60%); }
+.pl-body { position: relative; padding: 0 var(--ctl-pad) clamp(110px, 20vh, 190px); max-width: 720px; }
+.pl-kicker { font-size: 13px; letter-spacing: .14em; text-transform: uppercase; color: var(--fg-2); margin-bottom: 10px; }
+.pl-text { font-size: clamp(26px, 4vw, 44px); font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
+.pl-sub { margin-top: 10px; min-height: 1.4em; color: var(--fg-2); font-size: 15px; font-variant-numeric: tabular-nums; }
+.pl-bar { margin-top: 22px; width: min(360px, 70%); height: 3px; border-radius: 3px; background: rgba(255,255,255,.18); overflow: hidden; }
+.pl-bar i { display: block; height: 100%; width: 38%; border-radius: inherit; background: #fff; animation: plSlide 1.5s var(--ease) infinite; }
+.pl-actions { margin-top: 22px; display: flex; gap: 10px; flex-wrap: wrap; }
+.p-loader.is-error .pl-text { color: #fff; }
+.p-loader.is-error .pl-img { opacity: .3; animation: none; }
+#pSpinner.under-loader { display: none; }
+.player[data-mode="mini"] .p-loader { display: grid; }
+.player[data-mode="mini"] .pl-body { padding: 0 14px 14px; }
+.player[data-mode="mini"] .pl-kicker, .player[data-mode="mini"] .pl-sub, .player[data-mode="mini"] .pl-bar { display: none; }
+.player[data-mode="mini"] .pl-text { font-size: 15px; }
+.player[data-mode="mini"] .pl-actions { margin-top: 8px; }
+.player[data-mode="mini"] #pSpinner.under-loader { display: none; }
+@keyframes plIn { from { opacity: 0; } }
+@keyframes plPush { to { transform: scale(1.14); } }
+@keyframes plSlide { 0% { transform: translateX(-110%); } 100% { transform: translateX(290%); } }
+@media (prefers-reduced-motion: reduce) { .pl-img { animation: none; } .pl-bar i { animation: none; width: 100%; opacity: .6; } }
 .p-status { margin-top: 110px; font-size: 14px; color: var(--fg-2); text-shadow: 0 1px 10px #000; text-align: center; padding: 0 20px; }
 
 .player[data-controls="hidden"] { cursor: none; }
@@ -432,3 +457,37 @@ kbd { font: 600 12px var(--font); padding: 3px 8px; border-radius: 6px; backgrou
 .chip:hover { background: rgba(255,255,255,.14); border-color: var(--line-2); }
 .search input:focus-visible { outline: none; }
 .search:focus-within { border-color: rgba(255,255,255,.55); }
+
+/* ---------- captions ---------- */
+.captions { position: absolute; left: 50%; bottom: 7%; transform: translateX(-50%); width: min(86%, 980px); text-align: center; pointer-events: none; z-index: 3; display: grid; justify-items: center; gap: 3px; transition: bottom .3s var(--ease); }
+.player[data-controls="visible"] .captions { bottom: 168px; }
+.cap-line { display: inline-block; max-width: 100%; padding: 2px 10px 3px; border-radius: 4px; background: rgba(0,0,0,.72); color: #fff; font: 500 clamp(17px, 2.1vw, 32px)/1.35 var(--font); text-shadow: 0 1px 2px rgba(0,0,0,.9); white-space: pre-wrap; }
+.player[data-mode="mini"] .captions { display: none; }
+#cCaptions.on { background: rgba(255,255,255,.18); }
+.cap-menu { position: absolute; right: var(--ctl-pad); bottom: 156px; z-index: 7; width: min(330px, calc(100vw - 32px)); max-height: 60vh; display: flex; flex-direction: column; background: rgba(14,14,14,.96); border: 1px solid var(--line-2); border-radius: var(--r-lg); backdrop-filter: blur(18px); box-shadow: 0 24px 70px rgba(0,0,0,.75); animation: popIn .25s var(--ease) both; overflow: hidden; }
+.cap-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 8px 4px 16px; }
+.cap-head strong { font-size: 15px; }
+.cap-list { overflow-y: auto; padding: 4px 8px; display: grid; gap: 2px; }
+.cap-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; height: 42px; padding: 0 12px; border-radius: var(--r-sm); font-size: 14px; transition: background .15s; }
+.cap-item:hover { background: rgba(255,255,255,.1); }
+.cap-item small { margin-left: auto; font-size: 11px; letter-spacing: .08em; color: var(--fg-3); text-transform: uppercase; }
+.cap-item small + small { margin-left: 8px; }
+.cap-item[aria-checked="true"] { background: rgba(255,255,255,.12); font-weight: 600; }
+.cap-item[aria-checked="true"]::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #fff; flex: none; }
+.cap-item[aria-checked="false"]::before { content: ""; width: 7px; flex: none; }
+.cap-empty { padding: 4px 16px 10px; font-size: 13px; color: var(--fg-2); }
+.cap-sync { display: flex; align-items: center; gap: 6px; padding: 6px 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--fg-2); }
+.cap-sync span { margin-right: auto; }
+.cap-sync .icon-btn { width: 34px; height: 34px; font-size: 20px; }
+.cap-sync output { min-width: 52px; text-align: center; color: #fff; font-variant-numeric: tabular-nums; }
+.cap-add { margin: 8px 12px 12px; }
+@media (max-width: 640px) { .cap-menu { bottom: 130px; } .player[data-controls="visible"] .captions { bottom: 138px; } }
+
+/* anime audio choice + loader skip */
+.pl-skip { margin-top: 18px; }
+.track-seg { display: flex; align-items: center; gap: 6px; padding: 4px 22px 12px; font-size: 12px; color: var(--fg-3); flex-wrap: wrap; }
+.track-seg span { margin-right: 4px; letter-spacing: .08em; text-transform: uppercase; }
+.track-seg button { height: 30px; padding: 0 12px; border-radius: 999px; background: rgba(255,255,255,.08); font-size: 12.5px; color: var(--fg-2); transition: background .15s, color .15s; }
+.track-seg button:hover { background: rgba(255,255,255,.16); }
+.track-seg button[aria-pressed="true"] { background: #fff; color: #000; font-weight: 600; }
+#cPip.active { background: rgba(255,255,255,.18); }

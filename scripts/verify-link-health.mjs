@@ -51,6 +51,13 @@ linkHealth.reset();
 out = await linkHealth.filterDeadLinks([{ url: `${base}/m.m3u8`, provider: 'p4', quality: 'Auto' }]);
 check('a dead .m3u8 is dropped, not waved through', out.streams.length === 0 && out.dead === 1);
 
+console.log('\n--- a provider-verified stream is trusted, not probed twice ---');
+mode = 'dead';   // any probe here would 403; a trusted stream must never be probed at all
+linkHealth.reset();
+out = await linkHealth.filterDeadLinks([{ url: `${base}/v.m3u8`, provider: 'p7', quality: 'Auto', verified: true }]);
+check('kept without probing', out.streams.length === 1 && out.dead === 0 && out.checked === 0,
+  `kept=${out.streams.length} dead=${out.dead} checked=${out.checked}`);
+
 console.log('\n--- 429 is treated as dead, not playable ---');
 mode = 'ratelimit';
 linkHealth.reset();

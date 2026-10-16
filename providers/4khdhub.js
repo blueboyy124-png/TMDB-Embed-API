@@ -1785,6 +1785,20 @@ const mapLimit = async (items, limit, fn) => {
     return out;
 };
 
+// 4khdhub hands back release files (mostly MKV), but the direct URLs usually carry no extension --
+// Google's usercontent host and Pixeldrain's /api/file/<id> are both extensionless -- so the shared
+// classifier (utils/streamMeta.js classifyForPlayback) could not tell what they are and marked them
+// playable. They are not: an H.264 MKV commonly plays video-only in Chrome (it demuxes the container but
+// cannot decode the Dolby/E-AC-3 audio track these AMZN WEB-DL releases ship), which is the "the sound
+// doesn't work" report. The release filename in the title carries the truth (".mkv", "DDP2.0"), so read
+// the container from it and let the classifier do the rest.
+function containerFromRelease(title, url) {
+    const m = /\.(mkv|mp4|m4v|webm|mov|avi|wmv|flv|ts)(?=["'\s]|$)/i.exec(String(title || ''));
+    if (m) return m[1].toLowerCase();
+    const ext = /\.(mkv|mp4|m4v|webm|mov|avi|wmv|flv|ts)(?:[?#]|$)/i.exec(String(url || ''));
+    return ext ? ext[1].toLowerCase() : null;
+}
+
 // Main function to get streams for the addon
 async function get4KHDHubStreams(tmdbId, type, season = null, episode = null, signal = null) {
     // Helper to check abort signal and throw if aborted
@@ -2024,14 +2038,22 @@ async function get4KHDHubStreams(tmdbId, type, season = null, episode = null, si
 
         checkAbort();
         // Normalize to generic stream object format
-        let streams = validatedLinks.map(link => ({
-            name: link.name, // Don't add prefix since it's already included
-            title: link.title || link.name,
-            url: link.url,
-            quality: `${link.quality}p`,
-            provider: "4khdhub",
-            headers: {}
-        }));
+        let streams = validatedLinks.map(link => {
+            const release = String(link.title || link.name || '');
+            const container = containerFromRelease(release, link.url);
+            return {
+                name: link.name, // Don't add prefix since it's already included
+                title: link.title || link.name,
+                url: link.url,
+                quality: `${link.quality}p`,
+                provider: "4khdhub",
+                // Lets utils/streamMeta.js classifyForPlayback mark these MKV/Dolby releases as
+                // not-playable-in-browser instead of handing the player a silent video. See the
+                // helper above for why the URL alone cannot be trusted here.
+                ...(container ? { container } : {}),
+                headers: {}
+            };
+        });
 
         // Always remove r2.dev links
         {

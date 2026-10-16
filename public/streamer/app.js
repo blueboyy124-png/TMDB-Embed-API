@@ -6,19 +6,30 @@
   'use strict';
 
   /* =====================================================================
-   * Config — ONE constant decides the API origin.
-   * Default: the same origin that served this page, whatever the host or
-   * scheme. A deployment on Vercel / Fly / a reverse proxy / a LAN address
-   * therefore just works, and proxy URLs stay on the host the client used.
-   * Nothing is pinned to port 8787 any more. Override with ?api=https://host
-   * for the edge case where the UI and the API live on different origins.
+   * Config — ONE constant decides the API origin. It always uses the same
+   * host the page was opened on, so proxy URLs built from the Host header
+   * stay consistent. Override with ?api=http://host:port if needed.
    * ===================================================================== */
   const API = (function () {
-    const override = new URLSearchParams(location.search).get('api');
-    if (override) return override.replace(/\/$/, '');
-    if (location.protocol === 'http:' || location.protocol === 'https:') return location.origin;
-    // Opened from disk (file://) or a webview with no real origin: fall back to the dev port.
-    return 'http://localhost:8787';
+    // Optional: hard-code your hosted API here, e.g. 'https://your-project.vercel.app'. Leave '' to auto-detect.
+    const API_URL = '';
+    const KEY = 'macstream.api';
+    const clean = (u) => String(u).trim().replace(/\/+$/, '').replace(/\/api$/i, '');
+    const params = new URLSearchParams(location.search);
+    const fromQuery = params.get('api');
+    let saved = '';
+    try {
+      if (fromQuery === 'reset') localStorage.removeItem(KEY);
+      else if (fromQuery) localStorage.setItem(KEY, clean(fromQuery));   // remembered, so ?api= is only needed once
+      saved = localStorage.getItem(KEY) || '';
+    } catch (_) { /* storage blocked: fall through */ }
+    if (fromQuery && fromQuery !== 'reset') return clean(fromQuery);
+    if (API_URL) return clean(API_URL);
+    if (saved) return clean(saved);
+    if (location.port === '8787') return location.origin;
+    const local = ['localhost', '127.0.0.1', '[::1]', ''].includes(location.hostname);
+    if (!local) return location.origin;                                   // hosted next to the API
+    return `${location.protocol === 'https:' ? 'http:' : location.protocol}//${location.hostname}:8787`;
   })();
 
   /* ---------- tiny utilities ---------- */
@@ -56,6 +67,8 @@
     mute: ['', '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M16 9.5l5 5M21 9.5l-5 5"/>'],
     layers: ['', '<path d="M12 3.5l9 4.8-9 4.8-9-4.8z"/><path d="M3 12.4l9 4.8 9-4.8M3 16.6l9 4.8 9-4.8" opacity=".75"/>'],
     mini: ['', '<rect x="3" y="5" width="18" height="14" rx="2.5"/><rect x="12" y="11" width="7" height="5" rx="1" fill="currentColor"/>'],
+    pip: ['', '<rect x="3" y="5" width="18" height="14" rx="2.5"/><rect x="11.5" y="10.5" width="7" height="5.5" rx="1.2" fill="currentColor"/><path d="M6.5 9.5h4.5M6.5 12.5h2.5"/>'],
+    pipExit: ['', '<rect x="3" y="5" width="18" height="14" rx="2.5" opacity=".35"/><rect x="3" y="5" width="18" height="14" rx="2.5"/><rect x="11.5" y="10.5" width="7" height="5.5" rx="1.2" fill="currentColor"/>'],
     expand: ['', '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'],
     shrink: ['', '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>'],
     search: ['', '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>'],
@@ -68,6 +81,7 @@
     alert: ['', '<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5h.01"/>'],
     restart: ['', '<path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5M4.5 4v4.5H9"/>'],
     info: ['', '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/>'],
+    cc: ['', '<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10.4 10.3a2.5 2.5 0 1 0 0 3.4M17.2 10.3a2.5 2.5 0 1 0 0 3.4"/>'],
     chevSel: ['', '<path d="M6 9l6 6 6-6"/>']
   };
   function icon(name, extra) {
@@ -131,7 +145,7 @@
     delete all[progressKey(type, id)];
     store.write(PROGRESS_KEY, all);
   }
-  const prefs = Object.assign({ autoNext: true, volume: 1, muted: false }, store.read(PREFS_KEY, {}));
+  const prefs = Object.assign({ autoNext: true, volume: 1, muted: false, animeTrack: 'dub' }, store.read(PREFS_KEY, {}));
   const savePrefs = () => store.write(PREFS_KEY, prefs);
 
   /* =====================================================================
@@ -687,9 +701,9 @@
   const mp = new MacPlayer(video);
   const P = {}; // element refs
   ['pTitle', 'pSub', 'pSpinner', 'pBigPlay', 'pStatus', 'tCur', 'tRem', 'timeline', 'tlBuf', 'tlFill', 'tlThumb', 'tlTip',
-    'cMute', 'cVol', 'cBack', 'cPlay', 'cFwd', 'cNext', 'cStreams', 'cMini', 'cFull', 'mPlay', 'mFill', 'mTitle',
+    'cMute', 'cVol', 'cBack', 'cPlay', 'cFwd', 'cNext', 'cStreams', 'cMini', 'cPip', 'cFull', 'mPlay', 'mFill', 'mTitle',
     'stall', 'stallTitle', 'upnext', 'unStill', 'unKicker', 'unTitle', 'unAuto', 'unPlay', 'unPlayLabel', 'toast',
-    'drawer', 'drawerSub', 'drawerNote', 'drawerList', 'drawerMore'].forEach((id) => { P[id] = document.getElementById(id); });
+    'drawer', 'drawerSub', 'drawerNote', 'drawerList', 'drawerMore', 'trackSeg'].forEach((id) => { P[id] = document.getElementById(id); });
 
   /** state of the current playback session */
   let S = null;
@@ -699,35 +713,57 @@
   let toastTimer = null;
   let sse = null;
 
+  /** Higher = better. Real labels from the API: 2160p, 1080p, 720p, bare 1080/480/360, "Auto", and "ORG". */
   const qualityRank = (q) => {
-    if (!q) return 0;
-    const s = String(q).toUpperCase();
-    if (s === 'ORG' || s === 'ORIGINAL') return 2161;
-    if (/4K|UHD/.test(s)) return 2160;
-    const m = s.match(/(\d{3,4})\s*P?/);
+    if (q == null || q === '') return 0;
+    const t = String(q).trim().toUpperCase();
+    if (t === 'ORG' || t === 'ORIGINAL' || t === 'SOURCE' || t === 'REMUX') return 100;   // untouched source: last resort
+    if (t === 'AUTO' || t === 'ADAPTIVE') return 900;                                      // adaptive: just under an explicit 1080p
+    if (/4K|UHD/.test(t)) return 2160;
+    const m = t.match(/(\d{3,4})\s*P?/);
     return m ? Number(m[1]) : 0;
+  };
+  /** Per row: Febbox labels its adaptive playlists quality "ORG" but titles them "AUTO"; treat those as adaptive. */
+  const rowQuality = (s) => {
+    const q = qualityRank(s.quality);
+    if (q === 100 && /\bauto\b/i.test(`${s.name || ''} ${s.sourceTitle || ''}`) && /m3u8/i.test(`${s.container || ''} ${s.url || ''}`)) return 900;
+    return q;
   };
   const isPlayable = (s) => s && s.url && s.playableInBrowser !== false && s.linkDead !== true;
   const containerOf = (s) => String(s.container || (/\.mkv/i.test(s.url) ? 'mkv' : /\.mp4/i.test(s.url) ? 'mp4' : /m3u8/i.test(s.url) ? 'm3u8' : '')).toLowerCase();
-  const isEnglishish = (s) => !s.language || /^en/i.test(s.language) || /english/i.test(s.languageLabel || '');
+  /** language: the API often leaves `language` null and only says "[Hindi]" in the row name. */
+  const rowLang = (s) => {
+    const l = String(s.language || '').toLowerCase();
+    if (l) return l;
+    const m = `${s.name || ''} ${s.sourceTitle || ''}`.match(/\[([A-Za-z ]{2,20})\]/);
+    if (!m) return '';
+    const w = m[1].trim().toLowerCase();
+    return w === 'english' ? 'en' : w === 'japanese' ? 'ja' : w;
+  };
+  const rowTrack = (s) => (s.track === 'sub' || s.track === 'dub') ? s.track : (rowLang(s) === 'ja' && s.provider === 'anime' ? 'sub' : (rowLang(s).startsWith('en') && s.provider === 'anime' ? 'dub' : ''));
+  const isEnglishish = (s) => { const l = rowLang(s); return !l || l.startsWith('en'); };
+  const streamScore = (s) => {
+    const c = containerOf(s);
+    const lang = rowLang(s), track = rowTrack(s);
+    let sc = rowQuality(s) * 10 + (c === 'm3u8' ? 6 : c === 'mp4' ? 3 : 0);
+    if (track) sc += track === prefs.animeTrack ? 300 : 0;                                   // anime: honour sub/dub choice
+    else if (lang && !lang.startsWith('en') && lang !== 'ja') sc -= 20000;                   // other-language dub: only if nothing else
+    else if (isEnglishish(s)) sc += 3;
+    return sc;
+  };
 
-  /** "Best" = highest quality among playable rows; prefers m3u8/mp4 and English/undeclared audio. */
-  function selectBest(streams) {
-    const pool = streams.filter(isPlayable);
-    if (!pool.length) return null;
-    const score = (s) => {
-      const c = containerOf(s);
-      return qualityRank(s.quality) * 10 + (c === 'm3u8' || c === 'mp4' ? 4 : 0) + (isEnglishish(s) ? 3 : 0);
-    };
-    return pool.slice().sort((a, b) => score(b) - score(a))[0];
+  /** Playable rows, best first. Used for the automatic pick and for startup failover. */
+  function rankStreams(streams) {
+    return streams.filter(isPlayable).sort((x, y) => streamScore(y) - streamScore(x));
   }
+  const selectBest = (streams) => rankStreams(streams)[0] || null;
   function sortStreams(streams) {
     return streams.slice().sort((a, b) => {
       const pa = isPlayable(a) ? 1 : 0, pb = isPlayable(b) ? 1 : 0;
       if (pa !== pb) return pb - pa;
-      const q = qualityRank(b.quality) - qualityRank(a.quality);
+      const q = rowQuality(b) - rowQuality(a);
       if (q) return q;
-      return String(a.provider).localeCompare(String(b.provider));
+      return streamScore(b) - streamScore(a) || String(a.provider).localeCompare(String(b.provider));
     });
   }
 
@@ -736,21 +772,92 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { P.toast.hidden = true; }, ms || 2200);
   }
-  function showStatus(msg) { P.pStatus.textContent = msg || ''; P.pStatus.hidden = !msg; }
   function setSpinner(on) { P.pSpinner.hidden = !on; }
+
+  /* Pre-playback loading screen: title artwork + honest progress, replacing the bare spinner. */
+  const L = { el: $('#pLoader'), text: $('#pLoaderText'), sub: $('#pLoaderSub'), title: $('#pLoaderTitle'), img: $('#pLoaderImg'), bar: $('#pLoaderBar'), actions: $('#pLoaderActions') };
+  function showLoader(o) {
+    L.el.hidden = false;
+    L.el.classList.toggle('is-error', !!o.error);
+    L.text.textContent = o.text || '';
+    L.sub.textContent = o.sub || '';
+    L.actions.hidden = !o.actions;
+    L.bar.hidden = !!o.error;
+    P.pSpinner.classList.add('under-loader');
+    if (o.error) setSpinner(false); else setSpinner(true);
+    paintLoaderArt();
+  }
+  function hideLoader() { L.el.hidden = true; P.pSpinner.classList.remove('under-loader'); hideSkip(); }
+  function paintLoaderArt() {
+    if (!S) return;
+    L.title.textContent = S.title || '';
+    const art = S.backdrop || S.poster || '';
+    if (art && L.img.dataset.src !== art) { L.img.dataset.src = art; L.img.src = art; L.img.hidden = false; }
+    else if (!art) L.img.hidden = true;
+  }
+  function updateLoaderProgress() {
+    if (!S || L.el.hidden || S.started || L.el.classList.contains('is-error')) return;
+    const st = Object.values(S.providerStatus || {});
+    const done = st.filter((v) => v !== 'pending').length;
+    const n = S.streams.filter(isPlayable).length;
+    L.sub.textContent = st.length ? `${done} of ${st.length} sources checked${n ? ` · ${n} ready` : ''}` : '';
+  }
+
+  /* ---------- picture-in-picture (a real floating window over other apps) ---------- */
+  // The in-page "mini player" only lives inside this tab. Native PiP hands the video to the OS as an
+  // always-on-top window, so it keeps playing over other apps and screens -- the behaviour of a normal
+  // player app. In-page mini stays as the fallback when PiP is unavailable.
+  const pip = {
+    get active() {
+      return document.pictureInPictureElement === video
+        || video.webkitPresentationMode === 'picture-in-picture';
+    },
+    get supported() {
+      return (typeof video.requestPictureInPicture === 'function' && document.pictureInPictureEnabled !== false)
+        || typeof video.webkitSetPresentationMode === 'function';
+    },
+    async enter(quiet) {
+      if (!S || this.active) return false;
+      const say = (m) => { if (!quiet) toast(m); };
+      if (!this.supported) { say('Picture-in-Picture isn’t supported in this browser'); return false; }
+      if (video.readyState < 2) { say('Video isn’t ready yet — try again in a moment'); return false; }
+      try {
+        if (typeof video.requestPictureInPicture === 'function' && document.pictureInPictureEnabled !== false) {
+          await video.requestPictureInPicture();
+        } else {
+          video.webkitSetPresentationMode('picture-in-picture');
+        }
+        return true;
+      } catch (e) {
+        if (e && e.name === 'NotAllowedError') say('Play the video first, then open Picture-in-Picture');
+        else if (e && e.name === 'NotSupportedError') say('This stream can’t float in Picture-in-Picture');
+        else say('Picture-in-Picture unavailable');
+        return false;
+      }
+    },
+    async exit() {
+      try {
+        if (document.pictureInPictureElement === video) await document.exitPictureInPicture();
+        else if (typeof video.webkitSetPresentationMode === 'function' && video.webkitPresentationMode === 'picture-in-picture') video.webkitSetPresentationMode('inline');
+      } catch (_) { /* ignore */ }
+    },
+    async toggle() { if (this.active) await this.exit(); else await this.enter(); }
+  };
 
   /* ---------- opening / closing ---------- */
   function setMode(mode) {
+    const prev = playerEl.dataset.mode;
     playerEl.dataset.mode = mode;
     document.body.classList.toggle('player-full', mode === 'full' && !playerEl.hidden);
     if (mode === 'mini' && document.fullscreenElement) document.exitFullscreen().catch(() => { });
-    if (mode === 'full') bumpControls();
+    if (mode === 'full') { pip.exit(); bumpControls(); }
+    else if (mode === 'mini' && prev !== 'mini') pip.enter(true);      // quiet: falls back to the in-page mini player
   }
 
   async function startPlayback(opts) {
     const type = opts.type, id = String(opts.id);
     // Tear down whatever was playing, saving its position first.
-    if (S) { saveNow(true); abortStreams(); }
+    if (S) { saveNow(true); abortStreams(); clearTimeout(S.startTimer); clearTimeout(S.animeTimer); }
     const gen = ++genCounter;
 
     // Resolve what to play (episode + resume position).
@@ -767,9 +874,13 @@
       gen, type, id, season, episode, startAt,
       title: (saved && saved.title) || '', poster: saved && saved.poster, backdrop: saved && saved.backdrop,
       episodeName: '', streams: [], payload: null, providerStatus: {}, activeUrl: null, started: false,
-      next: null, upnextDismissed: false, earlyTimer: null, finished: false, meta: null
+      next: null, upnextDismissed: false, earlyTimer: null, finished: false, meta: null,
+      hasPlayed: false, autoPicked: false, userPicked: false, tried: new Set(), failovers: 0,
+      recoveries: [], recovering: false, fatalPending: false, pausedAt: 0, startTimer: null,
+      extra: [], animeWait: false, animeSettled: false, skipAnime: false, animeTimer: null, metaP: null
     };
 
+    caps.reset({ clearFiles: true }); closeCapMenu();
     playerEl.hidden = false;
     playerEl.tabIndex = -1;
     setMode('full');
@@ -779,17 +890,18 @@
     P.cNext.hidden = true;
     P.stall.hidden = true; P.upnext.hidden = true; P.pBigPlay.hidden = true;
     closeDrawer();
-    setSpinner(true); showStatus('Finding the best stream…');
+    showLoader({ text: 'Loading', sub: '' });
     updateTitleUI();
     updateTimeUI();
     video.volume = prefs.volume; video.muted = prefs.muted; syncVolumeUI();
     bumpControls();
 
     // Metadata for the title (don't block streams on it).
-    getMeta(type, id).then((m) => {
+    S.metaP = getMeta(type, id).then((m) => {
       if (!S || S.gen !== gen) return;
       S.meta = m; S.title = m.title || S.title; S.poster = m.poster || S.poster; S.backdrop = m.backdrop || S.backdrop; S.year = yearOf(m);
-      updateTitleUI();
+      updateTitleUI(); paintLoaderArt();
+      if (m.isAnime) startAnimeFetch(gen);
     }).catch(() => { });
     if (type === 'series') loadEpisodeContext(gen);
 
@@ -828,7 +940,9 @@
     if (!S) return;
     saveNow(true);
     abortStreams();
-    mp.stop();
+    clearTimeout(S.startTimer); clearTimeout(S.animeTimer);
+    mp.stop(); hideLoader(); pip.exit();
+    caps.reset({ clearFiles: true }); closeCapMenu();
     S = null; genCounter++;
     playerEl.hidden = true;
     document.body.classList.remove('player-full');
@@ -881,7 +995,10 @@
       renderDrawer();
       // Fast first frame: if something clearly playable arrives early, start in ~1.5s (a better row may still land).
       if (!S.started && !S.earlyTimer && rows.some((r) => isPlayable(r) && ['m3u8', 'mp4'].includes(String(r.container || '').toLowerCase()))) {
-        S.earlyTimer = setTimeout(() => { S && S.gen === gen && !S.started && autoPick(); }, 1500);
+        // Only rush when a high-quality row is already in; otherwise give better sources a few seconds to land.
+        const top = selectBest(S.streams);
+        const fast = top && qualityRank(top.quality) >= 1080 && qualityRank(top.quality) !== 100;
+        S.earlyTimer = setTimeout(() => { S && S.gen === gen && !S.started && autoPick(); }, fast ? 1500 : 6000);
       }
     });
     sse.addEventListener('done', (e) => {
@@ -900,11 +1017,33 @@
       ingestFinal(d, gen);
     } catch (err) {
       if (!S || S.gen !== gen) return;
-      setSpinner(false);
-      showStatus(health.ok === false ? 'The MacStream API is offline.' : 'Couldn’t load streams. ' + (err.message || ''));
+      showLoader({ error: true, text: health.ok === false ? 'Can’t reach the MacStream API' : 'Couldn’t load streams', sub: health.ok === false ? 'Check that the API is running, then try again.' : 'Something went wrong while looking for sources.', actions: true });
       P.drawerSub.textContent = 'Couldn’t load streams';
     }
   }
+
+  /* ---- anime: the combined route often leaves before the (slow, ~20s+) anime provider answers ---- */
+  const ANIME_MAX_WAIT_MS = 30000;
+  function startAnimeFetch(gen) {
+    if (!S || S.gen !== gen || S.animeWait || S.animeSettled) return;
+    S.animeWait = true;
+    const done = () => {
+      if (!S || S.gen !== gen || S.animeSettled) return;
+      S.animeSettled = true; S.animeWait = false; clearTimeout(S.animeTimer);
+      renderDrawer(); hideSkip();
+      if (!S.started && (S.payload || S.streams.length)) autoPick();
+      else if (S.started) { const n = S.extra.length; if (n) toast(`${n} anime source${n > 1 ? 's' : ''} found — open Streams to switch`, 3500); }
+    };
+    S.animeTimer = setTimeout(done, ANIME_MAX_WAIT_MS);
+    api(`/api/streams/anime/${S.type}/${S.id}${epQuery()}`, { timeout: ANIME_MAX_WAIT_MS + 5000 })
+      .then((d) => { if (!S || S.gen !== gen) return; S.extra = normalizeRows(d); mergeRows(S.extra); })
+      .catch(() => { })
+      .then(done);
+  }
+  const skipBtn = $('#pLoaderSkip');
+  function showSkip() { if (skipBtn) skipBtn.hidden = false; }
+  function hideSkip() { if (skipBtn) skipBtn.hidden = true; }
+  if (skipBtn) skipBtn.addEventListener('click', () => { if (!S) return; S.skipAnime = true; hideSkip(); autoPick(); });
 
   function mergeRows(rows) {
     const have = new Set(S.streams.map((s) => s.url));
@@ -918,31 +1057,113 @@
     // The `done` frame supersedes everything received early.
     const rows = normalizeRows(payload);
     S.streams = rows;
+    mergeRows(S.extra);
     renderDrawer();
     if (!S.started) autoPick();
   }
 
-  function autoPick() {
+  async function autoPick() {
     if (!S) return;
+    const gen = S.gen;
     clearTimeout(S.earlyTimer); S.earlyTimer = null;
+    // Anime titles: give the anime provider time to answer before choosing (it is slow, ~20s).
+    if (S.metaP && !S.meta) { try { await Promise.race([S.metaP, new Promise((r) => setTimeout(r, 2500))]); } catch (_) { /* ignore */ } if (!S || S.gen !== gen || S.started) return; }
+    if (S.animeWait && !S.animeSettled && !S.skipAnime) {
+      showLoader({ text: 'Checking anime sources', sub: 'Anime sources can take up to 30 seconds' });
+      if (S.streams.some(isPlayable)) showSkip();
+      return;
+    }
     const best = selectBest(S.streams);
     if (!best) {
-      setSpinner(false);
       const only = S.streams.length;
-      showStatus(only ? 'None of the streams found can play in a browser (MKV / HEVC). Open Streams for details.' : 'No streams found for this title yet.');
+      showLoader({ error: true, text: only ? 'Nothing here can play in a browser' : 'No streams found yet', sub: only ? 'Every source is MKV/HEVC, which browsers can’t decode. Open Streams to see them.' : 'Try again in a moment, or wait for slower providers.', actions: true });
       if (only) openDrawer();
       return;
     }
     S.autoUrl = best.url;
-    activate(best, { startAt: S.startAt, autoplay: true });
+    activate(best, { startAt: S.startAt, autoplay: true, auto: true });
   }
 
+  const STARTUP_TIMEOUT_MS = 25000;
   function activate(stream, o) {
+    clearTimeout(S.startTimer);
     S.activeUrl = stream.url; S.started = true; S.upnextDismissed = false;
-    S.activeStream = stream;
-    showStatus(''); setSpinner(true); P.pBigPlay.hidden = true; P.stall.hidden = true;
-    mp.load(stream.url, { startAt: o.startAt || 0, autoplay: o.autoplay !== false });
+    hideSkip();
+    S.activeStream = stream; S.tried.add(stream.url);
+    S.autoPicked = !!o.auto; S.userPicked = !!o.manual;
+    P.pBigPlay.hidden = true; P.stall.hidden = true;
+    if (!S.hasPlayed) showLoader({ text: 'Starting playback', sub: `${stream.quality && String(stream.quality).toUpperCase() !== 'AUTO' ? stream.quality + ' · ' : ''}${stream.provider || ''}`.replace(/ · $/, '') });
+    else setSpinner(true);
+    caps.reset();
+    caps.setExternal(MacCaptions.extractSubtitles(stream, S.payload, S.streams));
+    mp.load(stream.url, { startAt: o.startAt || 0, autoplay: o.autoplay !== false, hls: containerOf(stream) === 'm3u8' ? true : containerOf(stream) === 'mp4' ? false : undefined });
+    // A source that never produces a first frame is treated like a failed one (startup failover only).
+    if (o.auto && !S.hasPlayed) { const gen = S.gen; S.startTimer = setTimeout(() => { if (S && S.gen === gen && !S.hasPlayed) failoverNext('timeout'); }, STARTUP_TIMEOUT_MS); }
     renderDrawer();
+  }
+
+  /** Before the first frame only: quietly try the next-best source. Never runs once playback has begun. */
+  function failoverNext(reason) {
+    if (!S || S.hasPlayed) return;
+    clearTimeout(S.startTimer);
+    const next = rankStreams(S.streams).find((r) => !S.tried.has(r.url));
+    if (!next || S.failovers >= 6) {
+      showLoader({ error: true, text: 'We couldn’t start any source', sub: 'Open Streams to pick one manually, or try again.', actions: true });
+      openDrawer();
+      return;
+    }
+    S.failovers++;
+    showLoader({ text: 'That source didn’t respond', sub: `Trying another (${S.failovers}/6)…` });
+    activate(next, { startAt: S.startAt, autoplay: true, auto: true });
+  }
+
+  /* ---- keep playing when links expire (long pause, tab asleep, network blip) ---- */
+  const streamKey = (s) => [s.provider, s.quality, containerOf(s), s.sourceTitle || s.name || ''].join('|');
+  function matchStream(rows, prev) {
+    const ok = rows.filter(isPlayable);
+    return ok.find((r) => streamKey(r) === streamKey(prev))
+      || ok.find((r) => r.provider === prev.provider && String(r.quality) === String(prev.quality) && containerOf(r) === containerOf(prev))
+      || null;
+  }
+  /** Re-fetch fresh links and reload the SAME source (same provider/quality) at the current position. */
+  async function refreshActiveSource(reason) {
+    if (!S || S.recovering || !S.activeStream) return false;
+    const now = Date.now();
+    S.recoveries = S.recoveries.filter((t) => now - t < 120000);
+    if (S.recoveries.length >= 3) return false;                       // don't loop forever
+    S.recoveries.push(now);
+    S.recovering = true;
+    const gen = S.gen, prev = S.activeStream;
+    const pos = video.currentTime || S.startAt || 0, wasPaused = video.paused;
+    setSpinner(true); toast('Reconnecting…', 4000);
+    try {
+      const isAnimeRow = prev.provider === 'anime';
+      const d = await api(isAnimeRow ? `/api/streams/anime/${S.type}/${S.id}${epQuery()}` : `/api/streams/${S.type}/${S.id}${epQuery()}`, { timeout: 60000 });
+      if (!S || S.gen !== gen) return true;
+      const rows = normalizeRows(d);
+      const match = matchStream(rows, prev);
+      if (isAnimeRow) { S.extra = rows; S.streams = S.streams.filter((r) => r.provider !== 'anime'); mergeRows(rows); }
+      else { S.payload = d; if (d.providerStatus) S.providerStatus = d.providerStatus; S.streams = rows; mergeRows(S.extra); }
+      renderDrawer();
+      if (!match) return false;
+      S.startAt = pos; S.fatalPending = false;
+      activate(match, { startAt: pos, autoplay: !wasPaused, manual: S.userPicked, auto: false });
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      if (S && S.gen === gen) S.recovering = false;
+    }
+  }
+  async function handleFatal(info) {
+    if (!S || !S.started) return;
+    if (!S.hasPlayed) {
+      if (S.autoPicked) return failoverNext(info && info.reason);       // startup: fall through to the next candidate
+      offerSwitch('This stream couldn’t start'); return;                // user chose it: offer, never override
+    }
+    S.fatalPending = true;
+    const ok = await refreshActiveSource(info && info.reason);
+    if (!ok && S) { S.fatalPending = true; offerSwitch('This stream stopped working'); }
   }
 
   /** Manual override: switch source and keep the current position. */
@@ -951,12 +1172,12 @@
     const pos = video.currentTime || 0;
     const wasPaused = video.paused;
     S.startAt = pos;
-    activate(stream, { startAt: pos, autoplay: !wasPaused });
+    activate(stream, { startAt: pos, autoplay: !wasPaused, manual: true });
     toast(`Switched to ${stream.provider || 'stream'} · ${stream.quality || ''}`.trim());
   }
 
   /* ---------- streams drawer ---------- */
-  function openDrawer() { P.drawer.classList.add('open'); P.drawer.setAttribute('aria-hidden', 'false'); P.stall.hidden = true; renderDrawer(); bumpControls(); setTimeout(() => { const a = $('.stream.active', P.drawer) || $('.stream:not([aria-disabled="true"])', P.drawer) || $('#drawerClose'); a && a.focus({ preventScroll: true }); }, 380); }
+  function openDrawer() { closeCapMenu(); P.drawer.classList.add('open'); P.drawer.setAttribute('aria-hidden', 'false'); P.stall.hidden = true; renderDrawer(); bumpControls(); setTimeout(() => { const a = $('.stream.active', P.drawer) || $('.stream:not([aria-disabled="true"])', P.drawer) || $('#drawerClose'); a && a.focus({ preventScroll: true }); }, 380); }
   function closeDrawer() { P.drawer.classList.remove('open'); P.drawer.setAttribute('aria-hidden', 'true'); }
   const drawerOpen = () => P.drawer.classList.contains('open');
 
@@ -967,9 +1188,13 @@
     const vals = Object.values(st);
     const pending = vals.filter((v) => v === 'pending').length;
     const ok = vals.filter((v) => v === 'ok').length;
+    updateLoaderProgress();
     if (S.payload || list.length) {
       P.drawerSub.textContent = `${list.length} source${list.length === 1 ? '' : 's'}${vals.length ? ` · ${ok} of ${vals.length} providers` : ''}${S.payload ? '' : ' · still searching…'}`;
     }
+    const hasTracks = S.streams.some((r) => rowTrack(r));
+    P.trackSeg.hidden = !hasTracks;
+    P.trackSeg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.track === prefs.animeTrack)));
     P.drawerMore.hidden = !(S.payload && pending > 0);
     if (!P.drawerMore.hidden && !P.drawerMore.disabled) P.drawerMore.textContent = `Wait for slower providers (${pending})`;
     if (!list.length) {
@@ -1002,11 +1227,35 @@
     if (!isPlayable(s)) { toast(s.linkDead ? 'That link is dead.' : 'This format can’t play in a browser.'); return; }
     switchStream(s);
   });
+  P.trackSeg.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-track]'); if (!b || !S) return;
+    prefs.animeTrack = b.dataset.track; savePrefs();
+    renderDrawer();
+    toast(prefs.animeTrack === 'dub' ? 'Anime audio: English dub' : 'Anime audio: Japanese with subtitles');
+  });
+
+  /** Start the source search over (used by the loader's "Try again"). */
+  function retryStreams() {
+    if (!S) return;
+    abortStreams();
+    clearTimeout(S.startTimer);
+    S.started = false; S.hasPlayed = false; S.streams = []; S.payload = null; S.providerStatus = {};
+    S.tried = new Set(); S.failovers = 0; S.activeUrl = null; S.autoUrl = null;
+    clearTimeout(S.animeTimer); S.extra = []; S.animeWait = false; S.animeSettled = false; S.skipAnime = false; hideSkip();
+    if (S.meta && S.meta.isAnime) startAnimeFetch(S.gen);
+    mp.stop();
+    closeDrawer();
+    showLoader({ text: 'Loading', sub: '' });
+    renderDrawer();
+    openStreams(S.gen);
+  }
+  $('#pLoaderRetry').addEventListener('click', retryStreams);
+  $('#pLoaderStreams').addEventListener('click', openDrawer);
   P.drawerMore.addEventListener('click', async () => {
     if (!S) return;
     const gen = S.gen; P.drawerMore.disabled = true; P.drawerMore.textContent = 'Waiting for providers…';
     try {
-      const d = await api(`/api/streams/${S.type}/${S.id}${epQuery()}${epQuery() ? '&' : '?'}deadline=20000`, { timeout: 60000 });
+      const d = await api(`/api/streams/${S.type}/${S.id}${epQuery()}${epQuery() ? '&' : '?'}deadline=45000`, { timeout: 60000 });
       if (!S || S.gen !== gen) return;
       const before = S.streams.length;
       S.payload = d; if (d.providerStatus) S.providerStatus = d.providerStatus;
@@ -1018,6 +1267,56 @@
   $('#drawerClose').addEventListener('click', closeDrawer);
   P.cStreams.addEventListener('click', () => (drawerOpen() ? closeDrawer() : openDrawer()));
 
+  /* ---------- subtitles ---------- */
+  const caps = new MacCaptions({
+    video, overlay: $('#captions'), apiBase: API, getHls: () => mp.hls,
+    getPrefs: () => prefs, savePrefs,
+    onChange: () => renderCapMenu(),
+    onError: (e, err) => toast(err && err.message ? err.message : 'Couldn’t load those subtitles')
+  });
+  mp.on('subtitletracks', () => caps.refresh());
+  const capMenu = $('#capMenu');
+  const capOpen = () => !capMenu.hidden;
+  function openCapMenu() { closeDrawer(); P.stall.hidden = true; capMenu.hidden = false; $('#cCaptions').setAttribute('aria-expanded', 'true'); renderCapMenu(); bumpControls(); const a = $('.cap-item[aria-checked="true"]', capMenu) || $('.cap-item', capMenu); a && a.focus({ preventScroll: true }); }
+  function closeCapMenu() { capMenu.hidden = true; $('#cCaptions').setAttribute('aria-expanded', 'false'); }
+  function renderCapMenu() {
+    const list = caps.entries(), act = caps.active;
+    $('#cCaptions').classList.toggle('on', !!act);
+    $('#cCaptions').setAttribute('aria-pressed', act ? 'true' : 'false');
+    $('#capEmpty').hidden = list.length > 0;
+    const rows = [`<button type="button" class="cap-item" role="menuitemradio" aria-checked="${act ? 'false' : 'true'}" data-id="">Off</button>`]
+      .concat(list.map((e) => `<button type="button" class="cap-item" role="menuitemradio" aria-checked="${act && act.id === e.id ? 'true' : 'false'}" data-id="${esc(e.id)}">${esc(e.label)}${e.lang && e.label.toLowerCase() !== e.lang ? `<small>${esc(e.lang.toUpperCase())}</small>` : ''}${e.loading ? '<small>Loading…</small>' : ''}${e.kind === 'file' ? '<small>Your file</small>' : ''}</button>`));
+    $('#capList').innerHTML = rows.join('');
+    const syncable = act && (act.kind === 'ext' || act.kind === 'file');
+    $('#capSync').hidden = !syncable;
+    $('#capOffset').textContent = `${caps.offset > 0 ? '+' : ''}${caps.offset.toFixed(1)}s`;
+  }
+  $('#cCaptions').addEventListener('click', () => (capOpen() ? closeCapMenu() : openCapMenu()));
+  $('#capClose').addEventListener('click', closeCapMenu);
+  $('#capList').addEventListener('click', async (e) => {
+    const b = e.target.closest('.cap-item'); if (!b) return;
+    await caps.select(b.dataset.id || null);
+    renderCapMenu();
+  });
+  $('#capAdd').addEventListener('click', () => $('#capFile').click());
+  $('#capFile').addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    try { await caps.addFile(f); toast('Subtitles added'); } catch (_) { toast('Couldn’t read that file'); }
+    renderCapMenu();
+  });
+  $('#capEarlier').addEventListener('click', () => caps.setOffset(caps.offset - 0.5));
+  $('#capLater').addEventListener('click', () => caps.setOffset(caps.offset + 0.5));
+  function toggleCaptions() {
+    if (!S) return;
+    if (caps.active) { caps.select(null); toast('Subtitles off'); return; }
+    const all = caps.entries();
+    if (!all.length) { openCapMenu(); return; }
+    const want = (prefs.captionLang || 'en').toLowerCase();
+    const pick = all.find((x) => x.lang && x.lang.startsWith(want)) || all.find((x) => /^en/.test(x.lang)) || all[0];
+    caps.select(pick.id).then(() => toast(`Subtitles: ${pick.label}`));
+  }
+
   /* ---------- stall offers (offer, never auto-switch) ---------- */
   function offerSwitch(title) {
     if (!S || playerEl.dataset.mode === 'mini' && false) return;
@@ -1027,7 +1326,7 @@
     bumpControls();
   }
   mp.on('stall', () => offerSwitch('Playback looks stuck'));
-  mp.on('fatal', () => offerSwitch('This stream stopped working'));
+  mp.on('fatal', (info) => handleFatal(info));
   mp.on('stallclear', () => { P.stall.hidden = true; });
   mp.on('blocked', () => { setSpinner(false); P.pBigPlay.hidden = false; });
   $('#stallDismiss').addEventListener('click', () => { mp.dismissOffer(); P.stall.hidden = true; });
@@ -1039,9 +1338,22 @@
   on('waiting', () => { if (S) setSpinner(true); });
   on('seeking', () => { if (S && !video.paused) setSpinner(true); });
   on('canplay', () => { if (S && !video.paused) setSpinner(false); });
-  on('playing', () => { setSpinner(false); showStatus(''); P.pBigPlay.hidden = true; setIcon(P.cPlay, 'pause'); setIcon(P.mPlay, 'pause'); bumpControls(); });
-  on('pause', () => { setIcon(P.cPlay, 'play'); setIcon(P.mPlay, 'play'); bumpControls(); });
-  on('play', () => { setIcon(P.cPlay, 'pause'); setIcon(P.mPlay, 'pause'); });
+  on('playing', () => { setSpinner(false); hideLoader(); if (S) { S.hasPlayed = true; S.fatalPending = false; S.pausedAt = 0; clearTimeout(S.startTimer); } P.pBigPlay.hidden = true; setIcon(P.cPlay, 'pause'); setIcon(P.mPlay, 'pause'); bumpControls(); });
+  on('pause', () => { if (S && !S.pausedAt && S.hasPlayed) S.pausedAt = Date.now(); setIcon(P.cPlay, 'play'); setIcon(P.mPlay, 'play'); bumpControls(); });
+  const STALE_AFTER_MS = 20 * 60 * 1000;
+  on('play', () => {
+    setIcon(P.cPlay, 'pause'); setIcon(P.mPlay, 'pause');
+    if (S && S.hasPlayed && S.pausedAt && Date.now() - S.pausedAt > STALE_AFTER_MS) refreshActiveSource('stale');
+    if (S) S.pausedAt = 0;
+  });
+  // Waking the tab or regaining the network: retry anything that failed while we were away.
+  function wake() {
+    if (!S || !S.hasPlayed) return;
+    if (S.fatalPending) { S.recoveries = []; refreshActiveSource('wake').then((ok) => { if (!ok) offerSwitch('This stream stopped working'); }); }
+    else mp.kick();
+  }
+  window.addEventListener('online', () => { health.check(); wake(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) wake(); });
   on('loadedmetadata', updateTimeUI);
   on('durationchange', updateTimeUI);
   on('progress', updateBuffer);
@@ -1135,13 +1447,26 @@
   $('#mClose').addEventListener('click', stopPlayback);
   $('#mExpand').addEventListener('click', () => setMode('full'));
 
+  /* ---------- picture-in-picture button + state sync ---------- */
+  P.cPip.addEventListener('click', () => pip.toggle());
+  const syncPip = () => {
+    const on = pip.active;
+    setIcon(P.cPip, on ? 'pipExit' : 'pip');
+    P.cPip.setAttribute('aria-label', on ? 'Exit Picture-in-Picture' : 'Picture-in-Picture (floats over other apps)');
+    P.cPip.classList.toggle('active', on);
+    caps.setNative(on);          // our caption overlay is not part of the floating window, so let the browser draw cues there
+  };
+  video.addEventListener('enterpictureinpicture', syncPip);
+  video.addEventListener('leavepictureinpicture', () => { syncPip(); if (S && playerEl.dataset.mode === 'mini') setMode('full'); });
+  video.addEventListener('webkitpresentationmodechanged', syncPip);
+
   /* ---------- controls auto-hide ---------- */
   function bumpControls() {
     playerEl.dataset.controls = 'visible';
     clearTimeout(controlsTimer);
     controlsTimer = setTimeout(() => {
       const hovering = $('.p-bottom:hover, .p-top:hover', playerEl);
-      if (video.paused || drawerOpen() || hovering || !P.stall.hidden || scrubbing) { bumpControls(); return; }
+      if (video.paused || drawerOpen() || capOpen() || hovering || !P.stall.hidden || scrubbing) { bumpControls(); return; }
       playerEl.dataset.controls = 'hidden';
     }, 3000);
   }
@@ -1232,6 +1557,7 @@
       if (S) {
         e.preventDefault();
         if (!P.stall.hidden) { mp.dismissOffer(); P.stall.hidden = true; return; }       // 1. stall banner
+        if (capOpen()) { closeCapMenu(); $('#cCaptions').focus(); return; }
         if (drawerOpen()) { closeDrawer(); return; }                                     // (drawer behaves like a dialog)
         if (playerEl.dataset.mode === 'full') { setMode('mini'); return; }               // 2. full -> mini
         stopPlayback();                                                                  // 3. mini -> stop + save
@@ -1251,6 +1577,7 @@
       case 'ArrowLeft': e.preventDefault(); seekBy(-10); break;
       case 'ArrowRight': e.preventDefault(); seekBy(10); break;
       case 'f': case 'F': e.preventDefault(); toggleFullscreen(); break;
+      case 'c': case 'C': e.preventDefault(); toggleCaptions(); bumpControls(); break;
       case 'm': case 'M': e.preventDefault(); video.muted = !video.muted; bumpControls(); break;
       default: return;
     }

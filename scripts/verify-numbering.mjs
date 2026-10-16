@@ -105,6 +105,28 @@ if (LIVE) {
     check(`${name} S${s}E${e} -> #${wantAbs}`, abs === wantAbs && nm.toLowerCase().includes(wantName.toLowerCase()),
       `abs=${abs} "${nm}"`);
   }
+
+  // The absolute number counts across the whole franchise, but AniList restarts at episode 1 every cour.
+  // resolveEpisodeEntry maps the former onto the entry that actually holds it; without it an episode-based
+  // source is asked for an episode the matched (first-cour) entry does not have and returns nothing.
+  const anilist = require('../utils/anilist.js');
+  console.log('\n== live AniList cour mapping (Attack on Titan) ==');
+  const aot = await anilist.getForTmdb('tv', 1429);
+  const courCases = [
+    [1, 16498, 1],    // S1E1
+    [25, 16498, 25],  // S1E25
+    [26, 20958, 1],   // S2E1
+    [38, 99147, 1],   // S3E1
+    [50, 104578, 1]   // S3E13, second half of TMDB's S3
+  ];
+  for (const [abs, wantId, wantEp] of courCases) {
+    const e = await anilist.resolveEpisodeEntry(aot, abs);
+    check(`AoT abs ${abs} -> entry ${wantId} ep ${wantEp}`,
+      !!e && e.id === wantId && e.episode === wantEp, e ? `${e.id}/${e.episode}` : 'null');
+  }
+  const onePiece = await anilist.getForTmdb('tv', 37854);
+  check('a single-entry run returns nothing to remap',
+    (await anilist.resolveEpisodeEntry(onePiece, 500)) === null);
 } else {
   console.log('\n(live TMDB/AniList cases skipped; re-run with --live)');
 }
