@@ -1,58 +1,47 @@
-// Run from your project root (the folder that contains utils/):  node test-anixo.js
-// Tries several ways of asking anixo for the playlist, each on its own freshly made link.
-let dispatcherFor = () => undefined;
-try { ({ dispatcherFor } = require('./utils/anixoAgent')); console.log('using utils/anixoAgent dispatcher'); }
-catch (e) { console.log('could not load utils/anixoAgent (' + e.message.split('\n')[0] + ') -> plain fetch'); }
+// Run from your project root:  node test-anixo2.js
+// Unlike the first test, this runs the REAL anime provider in this same process and then fetches the
+// links it made over the SAME shared anixo connection -- exactly what your server does. It also logs
+// every time that connection is opened or closed, which is what decides whether the links can work.
+try { require('dotenv').config(); } catch (_) { /* optional */ }
+const { dispatcherFor } = require('./utils/anixoAgent');
+const { getAnimeStreams } = require('./providers/anime');
 
-const API = process.env.API || 'http://localhost:8787';
-const URL_ = `${API}/api/streams/anime/series/1429?season=3&episode=1`;
-const UA124 = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-const UA131 = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-const REF = { Referer: 'https://anixo.buzz/' };
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+const H = { 'User-Agent': UA, Referer: 'https://anixo.buzz/' };
+const t0 = Date.now();
+const ts = () => `+${((Date.now() - t0) / 1000).toFixed(1)}s`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const variants = [
-  ['UA 124 + Referer      (what anime.js uses)', { 'User-Agent': UA124, ...REF }],
-  ['UA 131 + Referer      (what the proxy uses)', { 'User-Agent': UA131, ...REF }],
-  ['UA 131 + Referer + Origin', { 'User-Agent': UA131, ...REF, Origin: 'https://anixo.buzz' }],
-  ['no User-Agent + Referer', { ...REF }],
-  ['UA 124, NO Referer', { 'User-Agent': UA124 }],
-];
+const disp = dispatcherFor('https://anixo.buzz/');
+let opened = 0, closed = 0;
+disp.on('connect', () => { opened++; console.log(`${ts()}  connection OPENED  (total opened: ${opened})`); });
+disp.on('disconnect', (_o, _t, err) => { closed++; console.log(`${ts()}  connection CLOSED  (total closed: ${closed})${err ? ' ' + err.message : ''}`); });
+disp.on('connectionError', (_o, _t, err) => console.log(`${ts()}  connection ERROR ${err && err.message}`));
+
+const raw = (s) => { try { return decodeURIComponent(new URL(s.url).searchParams.get('url')); } catch (_) { return s.url; } };
+
+async function probe(label, u) {
+  try {
+    const r = await fetch(u, { headers: H, dispatcher: disp, redirect: 'follow' });
+    const body = (await r.text()).slice(0, 70).replace(/\s+/g, ' ');
+    console.log(`${ts()}  ${String(r.status).padEnd(4)} ${label}   connection-header=${r.headers.get('connection')}  ${r.status === 200 ? body : ''}`);
+    return r.status;
+  } catch (e) { console.log(`${ts()}  ERR  ${label}  ${e.message}`); return 0; }
+}
 
 (async () => {
-  const t0 = Date.now();
-  const d = await (await fetch(URL_)).json();
-  const lookupMs = Date.now() - t0;
-  const rows = (d.streams || []).filter(s => /anixo/i.test(s.url));
-  console.log(`lookup took ${lookupMs}ms, ${rows.length} anixo links`);
-  if (!rows.length) { console.log('no anixo links to test (wait a few minutes and retry)'); return; }
-  const raw = s => decodeURIComponent(new URL(s.url).searchParams.get('url'));
-  const madeAt = Date.now();
-  for (let i = 0; i < variants.length && i < rows.length; i++) {
-    const [label, headers] = variants[i];
-    const u = raw(rows[i]);
-    const disp = dispatcherFor(u);
-    try {
-      const r = await fetch(u, disp ? { headers, dispatcher: disp, redirect: 'follow' } : { headers, redirect: 'follow' });
-      const body = (await r.text()).slice(0, 250).replace(/\s+/g, ' ');
-      console.log(`${String(r.status).padEnd(4)} +${((Date.now() - madeAt) / 1000).toFixed(1)}s  ${label}   ${body}`);
-    } catch (e) { console.log(`ERR   ${label}   ${e.message}`); }
-  }
+  console.log('making links with the real anime provider (takes ~10-15s)...');
+  const rows = (await getAnimeStreams(1429, 'tv', 3, 1)).filter((r) => /anixo/i.test(r.url));
+  console.log(`${ts()}  ${rows.length} anixo links made`);
+  if (!rows.length) { console.log('no anixo links (anixo may be rate limiting you; wait a few minutes and retry)'); process.exit(0); }
 
-  // Phase 2: same link, shared connection vs brand-new connections. Your network may give each new
-  // connection a different public IP, and anixo ties a link to the IP that asked for it.
-  console.log('\n--- same link, shared connection vs fresh connections ---');
-  const u = raw(rows[0]);
-  const H = { 'User-Agent': UA124, ...REF };
-  const disp = dispatcherFor(u);
-  const status = async (opts) => { try { const r = await fetch(u, { headers: H, ...opts }); await r.text(); return r.status; } catch (e) { return 'ERR'; } };
-  let shared = [];
-  for (let i = 0; i < 3; i++) shared.push(await status(disp ? { dispatcher: disp } : {}));
-  console.log('shared connection x3:', shared.join(' '));
-  let fresh = [];
-  try {
-    const { Agent } = require('undici');
-    for (let i = 0; i < 4; i++) { const a = new Agent({ connections: 1 }); fresh.push(await status({ dispatcher: a })); await a.close(); }
-  } catch (e) { fresh = ['(undici not found: ' + e.message.split('\n')[0] + ')']; }
-  console.log('fresh connection  x4:', fresh.join(' '));
-  try { const ip = await (await fetch('https://api.ipify.org')).text(); console.log('your public IP right now:', ip); } catch (e) { /* ignore */ }
+  console.log('\n--- using the links right away, on the shared connection ---');
+  for (let i = 0; i < Math.min(3, rows.length); i++) await probe(`link ${i} right away`, raw(rows[i]));
+
+  console.log('\n--- same link again after waiting ---');
+  await sleep(5000);  await probe('link 0 after 5s', raw(rows[0]));
+  await sleep(10000); await probe('link 0 after 15s', raw(rows[0]));
+
+  console.log(`\nsummary: connection opened ${opened}x, closed ${closed}x`);
+  process.exit(0);
 })();

@@ -1,7 +1,7 @@
 const { getDetails } = require('../utils/tmdb');
 const anilist = require('../utils/anilist');
 const episodeNumbering = require('../utils/episodeNumbering');
-const { dispatcherFor } = require('../utils/anixoAgent');
+const { isAnixo, anixoFetch } = require('../utils/anixoAgent');
 
 /*
  * Anime provider.
@@ -338,9 +338,8 @@ async function getText(url, headers = {}, timeout = TIMEOUT) {
     try {
         // anixo is pinned to one shared connection so its IP-bound tokens are minted and used on the same
         // public IP; see utils/anixoAgent.js. dispatcher is undefined for every other host.
-        const dispatcher = dispatcherFor(url);
         const opts = { headers: { 'User-Agent': UA, ...headers }, signal: ctl.signal, redirect: 'follow' };
-        const r = await fetch(url, dispatcher ? { ...opts, dispatcher } : opts);
+        const r = await (isAnixo(url) ? anixoFetch(url, opts) : fetch(url, opts));
         if (r.status !== 200) throw new Error(`HTTP ${r.status} for ${url}`);
         return await r.text();
     } finally { clearTimeout(timer); }
@@ -398,7 +397,8 @@ async function isRealStream(link) {
     const extensionless = !MEDIA.test(link.url);
     if (!extensionless && !/\.(m3u8|mp4|mkv|webm)(\?|#|$)/i.test(link.url)) return false;
     const headers = { 'User-Agent': UA, ...(link.headers || {}) };
-    const dispatcher = dispatcherFor(link.url);
+    const viaAnixo = isAnixo(link.url);
+    const doFetch = (u, o) => (viaAnixo ? anixoFetch(u, o) : fetch(u, o));
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 7000);
     try {
@@ -407,14 +407,14 @@ async function isRealStream(link) {
         // use it: these hosts 403 axios on their own endpoints even with identical headers, which made every
         // anixo link look dead and the whole provider return nothing.
         if (/\.m3u8(\?|#|$)/i.test(link.url) || extensionless) {
-            const r = await fetch(link.url, dispatcher ? { headers, redirect: 'follow', signal: ctl.signal, dispatcher } : { headers, redirect: 'follow', signal: ctl.signal });
+            const r = await doFetch(link.url, { headers, redirect: 'follow', signal: ctl.signal });
             if (r.status !== 200) { if (process.env.ANIME_DEBUG) console.log(`[Anime] verify HTTP ${r.status}`); return false; }
             const body = await r.text();
             const ok = body.trimStart().startsWith('#EXTM3U');
             if (!ok && process.env.ANIME_DEBUG) console.log(`[Anime] verify non-m3u8 (${r.status}) body="${body.slice(0, 70).replace(/\s+/g, ' ')}"`);
             return ok;
         }
-        const r = await fetch(link.url, { headers: { ...headers, Range: 'bytes=0-1' }, redirect: 'follow', signal: ctl.signal, ...(dispatcher ? { dispatcher } : {}) });
+        const r = await doFetch(link.url, { headers: { ...headers, Range: 'bytes=0-1' }, redirect: 'follow', signal: ctl.signal });
         if (r.status !== 200 && r.status !== 206) return false;
         const type = String(r.headers.get('content-type') || '');
         try { await r.body?.cancel(); } catch (_) { /* body not needed; free the socket */ }

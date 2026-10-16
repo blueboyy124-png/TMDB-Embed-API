@@ -8,7 +8,7 @@ const { Readable } = require('stream');
 const http = require('http');
 const https = require('https');
 const { baseUrlFromRequest } = require('../utils/publicUrl');
-const { dispatcherFor } = require('../utils/anixoAgent');
+const { dispatcherFor, isAnixo, anixoFetch } = require('../utils/anixoAgent');
 
 // One shared, bounded connection pool per upstream scheme.
 //
@@ -81,6 +81,8 @@ const UPSTREAM_BODY_IDLE_TIMEOUT_MS = Number(process.env.PROXY_BODY_IDLE_TIMEOUT
 // plus a Node Readable `body` (undici hands back a web ReadableStream) so .pipe()/.on()/.destroy()
 // keep working unchanged.
 async function undiciCompatFetch(url, opts) {
+    // anixo ties its tokens to the client IP: it must ride the one kept-alive native socket (see utils/anixoAgent.js).
+    if (isAnixo(url)) return anixoFetch(url, opts);
     const dispatcher = dispatcherFor(url);
     const resp = await fetch(url, dispatcher ? { ...opts, dispatcher } : opts);
     let nodeBody;
@@ -601,7 +603,7 @@ function createProxyRoutes(app) {
             // HEAD preflight (only when no explicit Range requested) to get size for synthesized partial response
             let contentLength = null;
             let upstreamAcceptRanges = null;
-            if (!effectiveRange) {
+            if (!effectiveRange && !isAnixo(targetUrl)) {
                 try {
                     const headResp = await upstreamFetch(targetUrl, { method: 'HEAD', headers: { 'User-Agent': DEFAULT_UA, ...headers } }, { res, timeoutMs: UPSTREAM_ACCEL_TIMEOUT_MS });
                     if (headResp.ok) {
@@ -615,7 +617,7 @@ function createProxyRoutes(app) {
             }
 
             // Fallback probe: if still no size, attempt a 0-0 range request to derive total size from Content-Range
-            if (!effectiveRange && !contentLength) {
+            if (!effectiveRange && !contentLength && !isAnixo(targetUrl)) {
                 try {
                     const probeRange = 'bytes=0-0';
                     if (debug) console.log('[ts-proxy] probe range');
@@ -831,9 +833,8 @@ function processStreamsForProxy(streams, serverUrl) {
         } catch {
             // Ignore errors
         }
-        // Play anixo directly (no proxy relay) to avoid IP-bound token coupling and the latency
-        // that ages its short-lived tickets. Browser fetch with a real UA works against anixo and
-        // the API still classifies it correctly.
+        // anixo is relayed like everything else: the server mints and uses its tokens over one socket
+        // (utils/anixoAgent.js), so the player never contacts anixo itself.
         // Force specific hosts through ts-proxy (direct file style) even without extension
         if (host.includes('pixeldrain.') || host === 'video-downloads.googleusercontent.com') {
             return { ...s, url: `${serverUrl}/ts-proxy?url=${encodeURIComponent(original)}${hParam}` };
