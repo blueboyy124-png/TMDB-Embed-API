@@ -57,7 +57,10 @@
       video.addEventListener('emptied', () => this._reset());
       video.addEventListener('playing', () => { this.fatalRecoveries = 0; this.nativeRecoveries = 0; });
       video.addEventListener('timeupdate', () => {
-        this.lastPos = video.currentTime || 0;
+        // A dead element (lock screen, sleep) or a reload resets currentTime to 0 and fires timeupdate: that must not
+        // overwrite the last real position, or the recovery would restart the video from the beginning.
+        const t = video.currentTime || 0;
+        if (t > 0.5 || video.readyState >= 2) this.lastPos = t;
         if (this.lastPos > 0.5) this.playedOnce = true;
       });
       video.addEventListener('error', () => this._onNativeError());
@@ -78,6 +81,8 @@
       this.offeredAt = 0;
       this.fatalRecoveries = 0;
       this.url = url;
+      this.hint = hlsHint;
+      this._expiredSent = false;
       this.usingNative = false;
       this.playedOnce = startAt > 0.5;
       this.lastPos = startAt || 0;
@@ -134,11 +139,24 @@
     }
 
     _onHlsError(hls, data) {
-      if (hls !== this.hls || !data || !data.fatal) return;
+      if (hls !== this.hls || !data) return;
       const status = data.response && data.response.code;
+      if (!data.fatal) {
+        // hls.js retries a refused segment on its own for about a minute (6 tries, doubling delay), which is a frozen
+        // picture for a link that will never work again. A 401/403/410 means the token expired: report it NOW so the
+        // app can fetch a fresh link at the same position. (Subtitle files are optional, so they never count.)
+        const d = data.details || '';
+        const refused = status === 401 || status === 403 || status === 410 || (status === 404 && /manifest|level/i.test(d));
+        if (refused && /^(fragLoadError|levelLoadError|manifestLoadError|keyLoadError|audioTrackLoadError)$/.test(d) && !this._expiredSent) {
+          this._expiredSent = true;
+          this.emit('fatal', { reason: d, status, expired: true });
+        }
+        return;
+      }
       // 401/403/404/410 mean the link itself is dead or expired: retrying the same URL can't help,
       // so hand it to the app immediately (it re-fetches fresh links for the same source).
       const gone = status === 401 || status === 403 || status === 404 || status === 410;
+      if (gone && this._expiredSent) return;                      // already handed to the app
       // Before the first frame a dead/unreachable source should fail fast so the app can try the next one;
       // once playing, a network blip is worth the longer backoff.
       const maxRetries = this.playedOnce ? 3 : 1;
@@ -170,6 +188,7 @@
     _tryNativeRecover() {
       if (!this.playedOnce && this.lastPos < 1) return false;   // never painted: the first-frame path owns that
       if (this.nativeRecoveries >= 2) return false;
+      if (this.linkStale && this.linkStale()) return false;     // an old link will not come back by asking again
       const v = this.video;
       const pos = (v.currentTime && isFinite(v.currentTime)) ? v.currentTime : this.lastPos;
       const gen = this.generation;
@@ -191,6 +210,27 @@
 
     /** Nudge a stalled loader (after the tab wakes or the network returns). */
     kick() { if (this.hls) { try { this.hls.startLoad(-1); } catch (_) { /* noop */ } } }
+
+    /**
+     * True when the element has lost its media for good (what a lock screen or a sleeping laptop leaves behind,
+     * especially on iPad: no error event, just a black frame that never plays). The app answers with a reload.
+     */
+    isDead() {
+      const v = this.video;
+      if (!this.url) return false;
+      if (v.error) return true;
+      if (this.hls && !this.hls.media) return true;
+      if (v.networkState === 3 && (v.currentSrc || this.hls)) return true;                  // NETWORK_NO_SOURCE
+      return this.playedOnce && v.readyState === 0 && v.networkState !== 2;                  // nothing loaded, nothing loading
+    }
+
+    /** Resolves true when the picture was supposed to be playing but did not move for `ms`. */
+    watchProgress(ms) {
+      return new Promise((resolve) => {
+        const v = this.video, t0 = v.currentTime, gen = this.generation;
+        setTimeout(() => resolve(gen === this.generation && !v.paused && !v.ended && v.readyState < 3 && Math.abs(v.currentTime - t0) < 0.2), ms);
+      });
+    }
 
     selectEnglishAudio() {
       const isEn = (t) => /^en/i.test(t.lang || t.language || '') || /english/i.test(t.name || t.label || '');

@@ -3,12 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#000000">
+  <meta name="theme-color" content="#07090f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>MacStream</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23000'/%3E%3Cpath d='M12 9v14l11-7z' fill='%23fff'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <div class="bg-fx" aria-hidden="true"><i class="b1"></i><i class="b2"></i><i class="b3"></i></div>
   <a class="skip-link" href="#view">Skip to content</a>
 
   <header id="nav" class="nav">
@@ -20,15 +23,11 @@
       <a href="#/" data-nav="home"><span data-icon="home"></span><span>Home</span></a>
       <a href="#/browse/movie" data-nav="movie"><span data-icon="film"></span><span>Movies</span></a>
       <a href="#/browse/series" data-nav="series"><span data-icon="tv"></span><span>Series</span></a>
+      <a href="#/list" data-nav="list"><span data-icon="bookmark"></span><span>My List</span><b class="nav-badge" id="listBadge" hidden>0</b></a>
     </nav>
     <div class="nav-right">
-      <form id="searchForm" class="search" role="search" autocomplete="off">
-        <button type="button" id="searchToggle" class="icon-btn" aria-label="Search" aria-expanded="false"><span data-icon="search"></span></button>
-        <input id="searchInput" type="search" placeholder="Search movies and series" aria-label="Search movies and series" spellcheck="false">
-        <button type="button" id="searchClear" class="icon-btn search-clear" aria-label="Clear search" hidden><span data-icon="close"></span></button>
-      </form>
-      <button id="shortcutsBtn" class="icon-btn hide-mobile" aria-label="Keyboard shortcuts"><span data-icon="keyboard"></span></button>
-      <span id="statusDot" class="status-dot" role="status" aria-label="Checking server" title="Checking server…"></span>
+      <button id="surpriseBtn" type="button" class="icon-btn" aria-label="Surprise me" title="Surprise me"><span data-icon="shuffle"></span></button>
+      <a id="searchLink" class="icon-btn" href="#/search" aria-label="Search" title="Search"><span data-icon="search"></span></a>
     </div>
   </header>
 
@@ -63,7 +62,7 @@
       <div class="pl-shade"></div>
       <div class="pl-body">
         <p class="pl-kicker" id="pLoaderTitle"></p>
-        <h3 class="pl-text" id="pLoaderText">Loading</h3>
+        <h3 class="pl-text" id="pLoaderText">Finding the best source</h3>
         <p class="pl-sub" id="pLoaderSub"></p>
         <div class="pl-bar" id="pLoaderBar" aria-hidden="true"><i></i></div>
         <button id="pLoaderSkip" class="btn btn-sm btn-ghost pl-skip" hidden>Start with what’s ready</button>
@@ -132,7 +131,8 @@
         <span>Try another stream? We won't switch unless you ask.</span>
       </div>
       <div class="pop-actions">
-        <button id="stallSwitch" class="btn btn-sm btn-light">Switch</button>
+        <button id="stallRetry" class="btn btn-sm btn-light">Reconnect</button>
+        <button id="stallSwitch" class="btn btn-sm btn-ghost">Switch</button>
         <button id="stallDismiss" class="btn btn-sm btn-ghost">Dismiss</button>
       </div>
     </div>
@@ -197,6 +197,10 @@
       <dl>
         <div><dt><kbd>Space</kbd></dt><dd>Play / pause</dd></div>
         <div><dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Seek 10 seconds</dd></div>
+        <div><dt><kbd>j</kbd> <kbd>l</kbd></dt><dd>Back / forward 10 seconds</dd></div>
+        <div><dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Volume</dd></div>
+        <div><dt><kbd>0</kbd>–<kbd>9</kbd></dt><dd>Jump to 0–90% of the video</dd></div>
+        <div><dt><kbd>n</kbd></dt><dd>Next episode</dd></div>
         <div><dt><kbd>f</kbd></dt><dd>Fullscreen</dd></div>
         <div><dt><kbd>m</kbd></dt><dd>Mute</dd></div>
         <div><dt><kbd>c</kbd></dt><dd>Subtitles on / off</dd></div>

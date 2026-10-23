@@ -491,3 +491,526 @@ kbd { font: 600 12px var(--font); padding: 3px 8px; border-radius: 6px; backgrou
 .track-seg button:hover { background: rgba(255,255,255,.16); }
 .track-seg button[aria-pressed="true"] { background: #fff; color: #000; font-weight: 600; }
 #cPip.active { background: rgba(255,255,255,.18); }
+.track-seg button.is-empty:not([aria-pressed="true"]) { opacity: .5; }
+
+/* Until the first frame arrives only Streams (and the top bar's Back/Close) are available: nothing to seek, skip,
+   or change while a video is still loading. Everything fades in together once it plays. */
+.player[data-ready="false"] .timeline-row,
+.player[data-ready="false"] .ctl-left,
+.player[data-ready="false"] .ctl-center,
+.player[data-ready="false"] #cNext,
+.player[data-ready="false"] #cCaptions,
+.player[data-ready="false"] #cPip,
+.player[data-ready="false"] #cMini,
+.player[data-ready="false"] #cFull,
+.player[data-ready="false"] #mPlay { display: none !important; }
+.player[data-ready="false"] .controls { grid-template-columns: 1fr; }
+.player[data-ready="false"] .ctl-right { justify-content: center; }
+@keyframes ctl-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.player[data-ready="true"] .timeline-row, .player[data-ready="true"] .ctl-left, .player[data-ready="true"] .ctl-center, .player[data-ready="true"] .ctl-right > .icon-btn { animation: ctl-in .4s var(--ease) both; }
+@media (prefers-reduced-motion: reduce) { .player[data-ready="true"] .timeline-row, .player[data-ready="true"] .ctl-left, .player[data-ready="true"] .ctl-center, .player[data-ready="true"] .ctl-right > .icon-btn { animation: none; } }
+
+/* ---------- resume card "…" menu ---------- */
+.ccard .cc-more { position: absolute; z-index: 3; top: 8px; right: 8px; width: 32px; height: 32px; border-radius: 50%; background: rgba(0,0,0,.65); display: grid; place-items: center; opacity: 0; transition: opacity .2s, background .2s; backdrop-filter: blur(6px); }
+.ccard .cc-more .ic { width: 18px; height: 18px; }
+.ccard .cc-more:hover, .ccard .cc-more[aria-expanded="true"] { background: rgba(255,255,255,.28); }
+@media (hover: hover) { .ccard:hover .cc-more, .ccard:focus-within .cc-more, .ccard .cc-more[aria-expanded="true"] { opacity: 1; } }
+@media (hover: none) { .ccard .cc-more { opacity: 1; } }
+.card-menu { position: fixed; z-index: 400; min-width: 244px; padding: 6px; border-radius: var(--r-lg); background: rgba(24,24,24,.96); border: 1px solid var(--line-2); box-shadow: 0 24px 60px rgba(0,0,0,.7); backdrop-filter: blur(16px); }
+.card-menu button { display: flex; align-items: center; gap: 12px; width: 100%; height: 42px; padding: 0 12px; border-radius: var(--r-sm); font-size: 14px; text-align: left; transition: background .15s; }
+.card-menu button:hover, .card-menu button:focus-visible { background: rgba(255,255,255,.1); outline: none; }
+.card-menu .ic { width: 18px; height: 18px; color: var(--fg-2); }
+.card-menu button[data-act="remove"] { color: #ff9b9b; }
+.card-menu button[data-act="remove"] .ic { color: inherit; }
+
+/* ---------- info page ---------- */
+.d-info { gap: 14px; max-width: 700px; }
+.d-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; font-size: 14.5px; color: var(--fg-2); font-weight: 500; }
+.d-meta .score { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 11px; border-radius: 999px; background: rgba(255,255,255,.12); color: #fff; font-weight: 600; backdrop-filter: blur(8px); }
+.d-meta .score .ic { width: 13px; height: 13px; }
+.d-meta .tag { letter-spacing: 0; text-transform: none; font-size: 12.5px; height: 24px; padding: 0 10px; border-radius: 999px; }
+.d-genres { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0; padding: 0; }
+.d-genres li { height: 30px; display: inline-flex; align-items: center; padding: 0 13px; border-radius: 999px; border: 1px solid var(--line-2); font-size: 13px; color: #e8e8e8; background: rgba(0,0,0,.35); backdrop-filter: blur(6px); }
+.d-tagline { font-style: normal; font-size: 15.5px; color: #fff; font-weight: 500; }
+.d-overview-wrap { display: grid; justify-items: start; gap: 6px; }
+.d-overview.clamped { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.d-more { font-size: 13.5px; font-weight: 600; color: #fff; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: rgba(255,255,255,.4); padding: 2px 0; }
+.d-more:hover { text-decoration-color: #fff; }
+.btn-lg { height: 54px; padding: 0 28px; font-size: 16px; }
+.d-continue { display: grid; grid-template-columns: 148px 1fr; gap: 16px; align-items: center; width: 410px; max-width: 100%; padding: 8px 18px 8px 8px; border-radius: var(--r-lg); background: #fff; color: #000; text-align: left; transition: transform .2s var(--ease), box-shadow .2s; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+.d-continue:hover { transform: translateY(-2px); box-shadow: 0 16px 50px rgba(0,0,0,.55); }
+.d-continue:focus-visible { outline: 2px solid #fff; outline-offset: 4px; }
+.dc-thumb { position: relative; aspect-ratio: 16 / 9; border-radius: var(--r-md); overflow: hidden; background: #222; }
+.dc-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.dc-thumb::after { content: ""; position: absolute; inset: 0; background: linear-gradient(0deg, rgba(0,0,0,.55), transparent 60%); }
+.dc-play { position: absolute; z-index: 2; left: 50%; top: 50%; width: 38px; height: 38px; margin: -19px 0 0 -19px; border-radius: 50%; background: rgba(255,255,255,.95); color: #000; display: grid; place-items: center; }
+.dc-play .ic { width: 16px; height: 16px; margin-left: 2px; }
+.dc-thumb .bar { position: absolute; z-index: 2; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255,255,255,.3); }
+.dc-thumb .bar i { display: block; height: 100%; background: #fff; }
+.dc-text { display: grid; gap: 2px; min-width: 0; }
+.dc-text strong { font-size: 17px; font-weight: 700; }
+.dc-text span { font-size: 13.5px; color: #333; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.dc-text small { font-size: 12.5px; color: #666; font-weight: 600; }
+@media (max-width: 520px) { .d-continue { grid-template-columns: 112px 1fr; gap: 12px; } }
+
+.sec-head { padding: 28px 0 16px; border-bottom: 0; margin-bottom: 4px; }
+.sec-head h2 { font-size: 22px; font-weight: 650; letter-spacing: -.01em; text-transform: none; }
+.season-pills { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; max-width: 100%; padding: 2px; }
+.season-pills::-webkit-scrollbar { display: none; }
+.season-pill { flex: none; height: 36px; padding: 0 16px; border-radius: 999px; background: var(--surface-3); border: 1px solid var(--line); font-size: 13.5px; font-weight: 500; color: var(--fg-2); transition: background .15s, color .15s, border-color .15s; }
+.season-pill:hover { background: rgba(255,255,255,.12); color: #fff; }
+.season-pill[aria-selected="true"] { background: #fff; color: #000; border-color: #fff; font-weight: 600; }
+
+.ep { border-bottom: 0; border-radius: var(--r-lg); padding: 12px; margin: 2px 0; }
+.ep.is-current { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.ep.is-done .t strong, .ep.is-done .t p { opacity: .62; }
+.ep.is-done .img-wrap img { filter: saturate(.7) brightness(.8); }
+.ep .rt { display: grid; justify-items: end; gap: 6px; }
+.ep-state { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: rgba(255,255,255,.1); color: #ddd; }
+.ep-state .ic { width: 13px; height: 13px; stroke-width: 2.4; }
+.ep-state.now { background: #fff; color: #000; }
+.ep-state.next { background: rgba(255,255,255,.18); color: #fff; }
+.ep-state.done { background: transparent; color: var(--fg-3); padding: 0; }
+
+.facts { gap: 22px 40px; padding-top: 6px; }
+.facts dt { font-size: 13px; letter-spacing: 0; text-transform: none; color: var(--fg-3); margin-bottom: 3px; }
+.facts dd { font-size: 15.5px; }
+
+/* ---------- My List, Top 10, card actions ---------- */
+.card-over .chip-btn { position: absolute; top: 10px; left: 10px; width: 34px; height: 34px; border-radius: 50%; background: rgba(0,0,0,.62); border: 1.5px solid rgba(255,255,255,.7); color: #fff; display: grid; place-items: center; pointer-events: auto; transition: background .15s, border-color .15s, transform .15s; backdrop-filter: blur(6px); }
+.card-over .chip-btn .ic { width: 16px; height: 16px; stroke-width: 2.2; }
+.card-over .chip-btn:hover { background: rgba(255,255,255,.25); border-color: #fff; transform: scale(1.08); }
+.card-over .chip-btn[aria-pressed="true"] { background: #fff; color: #000; border-color: #fff; }
+.card-over .play-chip { pointer-events: auto; transition: transform .15s; }
+.card-over .play-chip:hover { transform: scale(1.1); }
+.card:focus-within .card-over { opacity: 1; transform: none; }
+.list-btn[aria-pressed="true"] { background: rgba(255,255,255,.2); color: #fff; border-color: #fff; }
+.snack { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 500; max-width: min(520px, calc(100vw - 32px)); padding: 12px 20px; border-radius: 999px; background: rgba(30,30,30,.96); border: 1px solid var(--line-2); box-shadow: 0 16px 50px rgba(0,0,0,.6); font-size: 14px; text-align: center; backdrop-filter: blur(14px); }
+
+.rail-top .scroller { gap: 6px; }
+.t10 { display: flex; align-items: flex-end; flex: none; position: relative; border-radius: var(--r-md); transition: transform .35s var(--ease); }
+.t10-n { font-size: clamp(110px, 11vw, 176px); line-height: .8; font-weight: 800; letter-spacing: -.04em; color: #000; -webkit-text-stroke: 3px rgba(255,255,255,.55); margin-right: -.1em; margin-left: 6px; position: relative; z-index: 0; user-select: none; }
+.t10 .img-wrap { position: relative; z-index: 1; width: clamp(104px, 10.5vw, 168px); aspect-ratio: 2 / 3; border-radius: var(--r-md); box-shadow: 0 0 0 1px var(--line), 0 12px 30px rgba(0,0,0,.6); }
+@media (hover: hover) { .t10:hover { transform: translateY(-4px) scale(1.03); z-index: 5; } }
+.t10:focus-visible { outline-offset: 4px; }
+
+/* ---------- info page tabs ---------- */
+.d-tabs { display: flex; gap: 28px; }
+.d-tab { position: relative; padding: 4px 0 12px; font-size: 20px; font-weight: 600; color: var(--fg-3); transition: color .15s; }
+.d-tab:hover { color: #fff; }
+.d-tab[aria-selected="true"] { color: #fff; }
+.d-tab[aria-selected="true"]::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 2px; background: #fff; }
+.d-body .sec-head:has(.d-tabs) { padding-bottom: 6px; align-items: flex-end; }
+.d-none { color: var(--fg-3); padding: 20px 0; }
+#moreRail { margin: 40px calc(var(--gutter) * -1) 0; }
+
+/* keep the season pills (and tabs) inside the header row on narrow screens */
+#seasonBox { min-width: 0; max-width: 100%; }
+.d-body .sec-head { flex-wrap: wrap; }
+@media (max-width: 640px) { #seasonBox { flex: 1 1 100%; } }
+
+/* =====================================================================
+   REFINEMENT PASS — calmer type, softer surfaces, rounder controls
+   ===================================================================== */
+:root {
+  --bg: #07090f;
+  --surface: #0d1017;
+  --surface-2: #151922;
+  --surface-3: #1e2330;
+  --line: rgba(255, 255, 255, .09);
+  --line-2: rgba(255, 255, 255, .18);
+  --fg-2: #c3c8d4;
+  --fg-3: #8a90a0;
+  --r-sm: 10px; --r-md: 12px; --r-lg: 16px;
+  --nav-h: 72px;
+}
+html, body { background: var(--bg); }
+body { font-family: "Inter", var(--font); font-feature-settings: "cv11", "ss01"; }
+::selection { background: rgba(255,255,255,.28); }
+
+/* nav: sentence case, quiet, glass when scrolled */
+.nav { background: linear-gradient(180deg, rgba(7,9,15,.9), rgba(7,9,15,0)); }
+.nav.scrolled { background: rgba(7,9,15,.78); }
+.brand-word { font-size: 17px; font-weight: 700; letter-spacing: -.01em; text-transform: none; }
+.nav-links { gap: clamp(6px, 1.2vw, 14px); }
+.nav-links a { font-size: 15px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--fg-2); padding: 9px 16px; border-radius: 999px; gap: 8px; transition: color .2s, background .2s; }
+.nav-links a::after { display: none; }
+.nav-links a:hover { background: rgba(255,255,255,.08); color: #fff; }
+.nav-links a[aria-current="page"] { background: rgba(255,255,255,.14); color: #fff; }
+.nav-links a .ic { width: 18px; height: 18px; }
+
+/* buttons: pill, sentence case */
+.btn { height: 54px; padding: 0 30px; border-radius: 999px; font-size: 16px; font-weight: 650; letter-spacing: 0; text-transform: none; gap: 10px; }
+.btn-sm { height: 40px; padding: 0 18px; font-size: 14px; letter-spacing: 0; }
+.btn-light { box-shadow: 0 8px 30px rgba(0,0,0,.35); }
+.btn-light:hover { background: #fff; transform: scale(1.035); }
+.btn-dark { background: rgba(255,255,255,.14); border-color: transparent; backdrop-filter: blur(14px); }
+.btn-dark:hover { background: rgba(255,255,255,.26); border-color: transparent; }
+.btn-ghost { background: rgba(255,255,255,.1); }
+
+/* hero: bigger title, calmer meta, no shouting caps */
+.hero::before { background:
+  linear-gradient(90deg, rgba(7,9,15,.96) 0%, rgba(7,9,15,.78) 16%, rgba(7,9,15,.38) 38%, rgba(7,9,15,.05) 62%, transparent 76%),
+  linear-gradient(0deg, var(--bg) 0%, rgba(7,9,15,.7) 10%, rgba(7,9,15,.16) 30%, transparent 46%),
+  linear-gradient(180deg, rgba(7,9,15,.75) 0%, transparent 22%); }
+.hero-kicker { font-size: 14px; letter-spacing: .01em; text-transform: none; font-weight: 600; color: var(--fg-2); }
+.hero-title { font-weight: 700; letter-spacing: -.045em; line-height: .96; }
+.hero-content { gap: 18px; animation: heroIn .8s var(--ease) both; }
+@keyframes heroIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+.hero-overview { color: #e8eaf0; font-size: clamp(15px, 1.2vw, 18px); }
+.hero-actions { margin-top: 10px; gap: 12px; }
+.hero-dots button::after { background: rgba(255,255,255,.3); }
+
+/* rails: friendlier headings, roomier spacing */
+.rails { gap: clamp(30px, 5vh, 58px); }
+.rail-head { margin-bottom: 8px; align-items: center; }
+.rail-head h2 { font-size: clamp(19px, 1.7vw, 25px); font-weight: 700; letter-spacing: -.015em; }
+.rail-head small { font-size: 13px; letter-spacing: 0; text-transform: none; color: var(--fg-3); font-weight: 500; }
+.rail-arrow.prev { background: linear-gradient(90deg, var(--bg), transparent); }
+.rail-arrow.next { background: linear-gradient(270deg, var(--bg), transparent); }
+.scroller { gap: 16px; padding-top: 14px; padding-bottom: 30px; }
+
+/* cards: rounded, lift + bright ring on hover/focus */
+.card .img-wrap, .cc-main > .img-wrap { border-radius: var(--r-md); box-shadow: 0 6px 22px rgba(0,0,0,.45), 0 0 0 1px var(--line); transition: box-shadow .3s var(--ease); }
+.card-over { border-radius: var(--r-md); background: linear-gradient(0deg, rgba(7,9,15,.96) 0%, rgba(7,9,15,.55) 48%, transparent 78%); }
+@media (hover: hover) {
+  .card:hover { transform: translateY(-6px) scale(1.06); }
+  .card:hover .img-wrap, .card:focus-within .img-wrap { box-shadow: 0 18px 44px rgba(0,0,0,.65), 0 0 0 3px rgba(255,255,255,.92); }
+  .ccard:hover { transform: translateY(-4px) scale(1.03); }
+  .ccard:hover .cc-main > .img-wrap { box-shadow: 0 18px 44px rgba(0,0,0,.65), 0 0 0 3px rgba(255,255,255,.92); }
+}
+.card-over strong { font-size: 15px; font-weight: 650; }
+.ccard .cc-text strong { font-size: 15px; font-weight: 650; }
+.ccard .cc-text span { color: var(--fg-3); }
+.t10-n { color: var(--bg); }
+
+/* soft focus: keyboard only, never a hard box on tabs/pills */
+:focus-visible { outline: 2px solid rgba(255,255,255,.9); outline-offset: 3px; border-radius: 10px; }
+.d-tab:focus-visible { outline: 0; box-shadow: 0 2px 0 0 #fff; border-radius: 4px; }
+.nav-links a:focus-visible, .season-pill:focus-visible { border-radius: 999px; }
+
+/* info page */
+.d-tab { font-size: 21px; font-weight: 650; }
+.ep { transition: background .2s; }
+.ep:hover { background: var(--surface-2); }
+.sec-head h2 { font-weight: 700; }
+.season-pill { background: var(--surface-3); }
+.d-continue { border-radius: var(--r-lg); }
+.skeleton { background: linear-gradient(100deg, #0d1017 30%, #1a1f2b 50%, #0d1017 70%); background-size: 200% 100%; }
+.img-wrap { background: var(--surface-2); }
+
+@media (max-width: 760px) {
+  .nav-links a { padding: 8px 12px; font-size: 14px; }
+  .btn { height: 50px; padding: 0 24px; font-size: 15px; }
+  .hero-title { letter-spacing: -.035em; }
+}
+@media (prefers-reduced-motion: reduce) { .hero-content { animation: none; } }
+
+/* room for the hover lift so rings/shadows aren't clipped by the scroller */
+.scroller { padding-top: 30px; padding-bottom: 36px; margin-top: -16px; margin-bottom: -6px; }
+.hero-content { bottom: clamp(64px, 11vh, 130px); }
+.hero-dots { bottom: clamp(74px, 12vh, 140px); }
+.hero-content { bottom: clamp(120px, 19vh, 190px); }
+.hero-dots { bottom: clamp(130px, 20vh, 200px); }
+
+/* info hero: seamless blend into the page + actions on one row */
+.d-hero::before { background:
+  linear-gradient(90deg, rgba(7,9,15,.96) 0%, rgba(7,9,15,.8) 16%, rgba(7,9,15,.4) 38%, transparent 66%),
+  linear-gradient(0deg, var(--bg) 0%, rgba(7,9,15,.82) 14%, transparent 52%),
+  linear-gradient(180deg, rgba(7,9,15,.75), transparent 24%); }
+.d-info { max-width: 820px; }
+.d-continue { width: 380px; }
+.d-hero .hero-actions { flex-wrap: wrap; row-gap: 12px; }
+@media (max-width: 900px) { .d-info { max-width: 100%; } .d-continue { width: 100%; } }
+
+/* =====================================================================
+   MOTION + NAV + HERO TRANSITION PASS
+   ===================================================================== */
+
+/* --- hero: the gradient now lives INSIDE each slide, so it fades with its art (never a bare frame) --- */
+.hero::before { display: none; }
+.hero-slide { isolation: isolate; z-index: 1; transition: opacity .9s var(--ease), visibility 0s linear .9s; }
+.hero-slide.active { z-index: 2; transition: opacity .9s var(--ease), visibility 0s; }
+/* the outgoing slide stays fully opaque until the incoming one has covered it, then disappears */
+.hero-slide:not(.active) { transition: opacity 0s linear .9s, visibility 0s linear .9s; }
+.hero-slide::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(7,9,15,.96) 0%, rgba(7,9,15,.78) 16%, rgba(7,9,15,.36) 38%, rgba(7,9,15,.04) 62%, transparent 76%),
+    linear-gradient(0deg, var(--bg) 0%, rgba(7,9,15,.82) 9%, rgba(7,9,15,.34) 24%, transparent 44%),
+    linear-gradient(180deg, rgba(7,9,15,.78) 0%, transparent 24%); }
+.hero-content { animation: none; }
+.hero-slide .hero-content > * { opacity: 0; transform: translateY(18px); transition: opacity .2s ease, transform .2s ease; }
+.hero-slide.active .hero-content > * { opacity: 1; transform: none; transition: opacity .8s var(--ease), transform .8s var(--ease); }
+.hero-slide.active .hero-content > :nth-child(1) { transition-delay: .25s; }
+.hero-slide.active .hero-content > :nth-child(2) { transition-delay: .33s; }
+.hero-slide.active .hero-content > :nth-child(3) { transition-delay: .41s; }
+.hero-slide.active .hero-content > :nth-child(4) { transition-delay: .49s; }
+.hero-slide.active .hero-content > :nth-child(5) { transition-delay: .57s; }
+.hero-slide.active .hero-content > :nth-child(n+6) { transition-delay: .65s; }
+/* progress dot fills over the 9s autoplay */
+.hero-dots button[aria-current="true"]::after { background: rgba(255,255,255,.35); background-image: linear-gradient(#fff, #fff); background-repeat: no-repeat; background-size: 0% 100%; animation: dotFill 9s linear forwards; }
+@keyframes dotFill { to { background-size: 100% 100%; } }
+
+/* --- nav: capsule links, round icon buttons, hides on scroll down, returns on scroll up --- */
+.nav { transition: background .35s var(--ease), border-color .35s, transform .45s var(--ease), box-shadow .35s; }
+.nav.scrolled { background: rgba(7,9,15,.66); backdrop-filter: blur(26px) saturate(1.5); -webkit-backdrop-filter: blur(26px) saturate(1.5); box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+.nav.nav-hide { transform: translateY(-110%); }
+.nav-links { padding: 4px; gap: 2px; background: rgba(255,255,255,.07); border: 1px solid var(--line); border-radius: 999px; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+.nav-links a { padding: 8px 18px; }
+.nav-links a[aria-current="page"] { background: #fff; color: #000; box-shadow: 0 4px 16px rgba(0,0,0,.35); }
+.nav-links a[aria-current="page"] .ic { opacity: .9; }
+.nav-right { gap: 10px; }
+.nav-right .icon-btn { width: 42px; height: 42px; background: rgba(255,255,255,.07); border: 1px solid var(--line); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+.nav-right .icon-btn:hover { background: rgba(255,255,255,.18); transform: translateY(-1px); }
+.nav-right .icon-btn .ic { width: 19px; height: 19px; }
+.brand { transition: transform .25s var(--ease); }
+.brand:hover { transform: scale(1.03); }
+.brand-mark { transition: transform .5s var(--ease); }
+.brand:hover .brand-mark { transform: rotate(-8deg) scale(1.08); }
+
+/* --- scroll reveal (class added by JS, only with motion allowed) --- */
+@media (prefers-reduced-motion: no-preference) {
+  .rv { opacity: 0; transform: translateY(26px); }
+  .rv.in { opacity: 1; transform: none; transition: opacity .7s var(--ease), transform .7s var(--ease); }
+  .rv.in .scroller > :nth-child(-n+9) { animation: cardIn .6s var(--ease) backwards; }
+  .rv.in .scroller > :nth-child(1) { animation-delay: .04s; } .rv.in .scroller > :nth-child(2) { animation-delay: .09s; }
+  .rv.in .scroller > :nth-child(3) { animation-delay: .14s; } .rv.in .scroller > :nth-child(4) { animation-delay: .19s; }
+  .rv.in .scroller > :nth-child(5) { animation-delay: .24s; } .rv.in .scroller > :nth-child(6) { animation-delay: .29s; }
+  .rv.in .scroller > :nth-child(7) { animation-delay: .34s; } .rv.in .scroller > :nth-child(8) { animation-delay: .39s; }
+  .rv.in .scroller > :nth-child(9) { animation-delay: .44s; }
+  @keyframes cardIn { from { opacity: 0; transform: translateX(34px) scale(.96); } }
+  /* info page entrance */
+  .d-info > * { animation: riseIn .8s var(--ease) backwards; }
+  .d-info > :nth-child(1) { animation-delay: .05s; } .d-info > :nth-child(2) { animation-delay: .12s; }
+  .d-info > :nth-child(3) { animation-delay: .19s; } .d-info > :nth-child(4) { animation-delay: .26s; }
+  .d-info > :nth-child(5) { animation-delay: .33s; } .d-info > :nth-child(6) { animation-delay: .4s; }
+  .d-info > :nth-child(n+7) { animation-delay: .47s; }
+  .d-art img { animation: artIn 1.6s var(--ease) backwards; }
+  @keyframes riseIn { from { opacity: 0; transform: translateY(20px); } }
+  @keyframes artIn { from { opacity: 0; transform: scale(1.06); } }
+  .ep.rv.in { transition-delay: calc(var(--i, 0) * 45ms); }
+  /* press feedback + softer hovers */
+  .btn, .icon-btn, .chip-btn, .play-chip, .season-pill, .d-tab { transition-property: transform, background, color, border-color, box-shadow, opacity; }
+  .btn:hover { transform: translateY(-2px); }
+  .btn:active, .icon-btn:active, .season-pill:active { transform: scale(.95); }
+  .season-pill:hover { transform: translateY(-1px); }
+  .ep-play { transition: opacity .25s, transform .3s var(--ease); transform: scale(.8); }
+  .ep:hover .ep-play, .ep:focus-visible .ep-play { transform: scale(1); }
+  .ep .img-wrap img { transition: transform .6s var(--ease), opacity .5s; }
+  .ep:hover .img-wrap img { transform: scale(1.06); }
+  .card .img-wrap img, .cc-main .img-wrap img { transition: transform .6s var(--ease), opacity .5s, filter .3s; }
+  .card:hover .img-wrap img { transform: scale(1.04); }
+  .card-over .chip-btn, .card-over .play-chip { transform: translateY(-6px) scale(.85); opacity: 0; transition: transform .35s var(--ease) .05s, opacity .3s .05s, background .15s; }
+  .card:hover .card-over .chip-btn, .card:hover .card-over .play-chip, .card:focus-within .card-over .chip-btn, .card:focus-within .card-over .play-chip { transform: none; opacity: 1; }
+  .view-enter { animation-duration: .55s; }
+  .snack { animation: snackIn .4s var(--ease) both; }
+  @keyframes snackIn { from { opacity: 0; transform: translate(-50%, 16px) scale(.96); } }
+  .rail-arrow .ic { transition: transform .25s var(--ease); }
+  .rail-arrow:hover .ic { transform: scale(1.25); }
+  .d-tab[aria-selected="true"]::after { animation: tabLine .35s var(--ease) backwards; transform-origin: left; }
+  @keyframes tabLine { from { transform: scaleX(0); } }
+}
+
+/* =====================================================================
+   AMBIENT BACKGROUND + CLEAN TRANSPARENT NAV
+   ===================================================================== */
+html { background: #07090f; }
+body { background: transparent; }
+.bg-fx { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; background: #07090f; contain: strict; }
+.bg-fx i { position: absolute; border-radius: 50%; will-change: transform; filter: blur(70px); }
+/* three huge, soft grey light pools drifting very slowly; JS adds a tiny pointer-parallax on top */
+.bg-fx .b1 { width: 70vmax; height: 70vmax; left: -18vmax; top: -22vmax; background: radial-gradient(circle, rgba(150,158,176,.20), transparent 62%); animation: drift1 38s ease-in-out infinite alternate; }
+.bg-fx .b2 { width: 62vmax; height: 62vmax; right: -20vmax; top: 18vh; background: radial-gradient(circle, rgba(104,112,132,.20), transparent 64%); animation: drift2 46s ease-in-out infinite alternate; }
+.bg-fx .b3 { width: 56vmax; height: 56vmax; left: 12vw; bottom: -30vmax; background: radial-gradient(circle, rgba(130,136,154,.16), transparent 64%); animation: drift3 52s ease-in-out infinite alternate; }
+.bg-fx::after { content: ""; position: absolute; inset: 0; background:
+  radial-gradient(120% 90% at 50% 40%, transparent 45%, rgba(0,0,0,.55) 100%),
+  repeating-linear-gradient(115deg, rgba(255,255,255,.012) 0 1px, transparent 1px 3px); }
+
+@keyframes drift1 { to { transform: translate3d(14vmax, 10vmax, 0) scale(1.15); } }
+@keyframes drift2 { to { transform: translate3d(-16vmax, -8vmax, 0) scale(1.1); } }
+@keyframes drift3 { to { transform: translate3d(10vmax, -12vmax, 0) scale(1.2); } }
+@media (prefers-reduced-motion: reduce) { .bg-fx i { animation: none; } }
+
+/* heroes now fade to transparent so they melt into the ambient background (no visible seam) */
+.hero-art, .d-art { -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%); mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%); }
+.hero-slide::before { background:
+  linear-gradient(90deg, rgba(7,9,15,.94) 0%, rgba(7,9,15,.74) 16%, rgba(7,9,15,.32) 38%, rgba(7,9,15,.03) 62%, transparent 76%),
+  linear-gradient(180deg, rgba(7,9,15,.55) 0%, transparent 22%); }
+.d-hero::before { background:
+  linear-gradient(90deg, rgba(7,9,15,.94) 0%, rgba(7,9,15,.76) 16%, rgba(7,9,15,.36) 38%, transparent 66%),
+  linear-gradient(0deg, rgba(7,9,15,.55) 0%, transparent 40%),
+  linear-gradient(180deg, rgba(7,9,15,.55), transparent 22%); }
+.rail-arrow.prev { background: linear-gradient(90deg, rgba(7,9,15,.85), transparent); }
+.rail-arrow.next { background: linear-gradient(270deg, rgba(7,9,15,.85), transparent); }
+.t10-n { color: #07090f; }
+
+/* nav: fully clear at the top (no gradient, no line); frosted only once scrolled */
+.nav { background: none; border-bottom: 0; }
+.nav.scrolled { background: rgba(10,12,18,.62); border-bottom: 0; box-shadow: 0 1px 0 rgba(255,255,255,.04), 0 14px 40px rgba(0,0,0,.35); }
+.nav:not(.scrolled) .brand-word, .nav:not(.scrolled) .nav-links a, .nav:not(.scrolled) .icon-btn { text-shadow: 0 1px 14px rgba(0,0,0,.55); }
+.bg-fx i { transition: translate 1.1s cubic-bezier(.22,.61,.36,1); }
+.hero-slide::before, .d-hero::before { -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 60%, transparent 100%); mask-image: linear-gradient(180deg, #000 0%, #000 60%, transparent 100%); }
+
+/* =====================================================================
+   PHASE 6 — icon alignment (root cause) + dedicated Search page
+   ===================================================================== */
+/* Root cause of the off-centre icons: the SVG was an inline box inside a <span>, so it sat on the text baseline of a
+   line box and rode ~3px high. Make the SVG a block and its wrapper a flex box so it has no line box at all. */
+.ic { display: block; }
+[data-icon] { display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; line-height: 0; flex: none; }
+.icon-btn[aria-current="page"] { background: #fff; color: #000; border-color: #fff; }
+.btn .ic, .chip .ic { flex: none; }
+
+.search-page { max-width: 1400px; padding-top: calc(var(--nav-h) + 28px); }
+.sp-form { position: relative; display: flex; align-items: center; height: 64px; max-width: 820px; border-radius: 999px; background: rgba(255,255,255,.07); border: 1px solid var(--line-2); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); transition: background .25s var(--ease), border-color .25s, box-shadow .25s; }
+.sp-form:focus-within { background: rgba(255,255,255,.11); border-color: rgba(255,255,255,.7); box-shadow: 0 0 0 4px rgba(255,255,255,.08), 0 18px 50px rgba(0,0,0,.4); }
+.sp-ic { position: absolute; left: 22px; top: 0; bottom: 0; display: flex; align-items: center; color: var(--fg-2); pointer-events: none; }
+.sp-ic .ic { width: 22px; height: 22px; }
+.sp-form input { flex: 1; min-width: 0; height: 100%; padding: 0 64px 0 62px; border: 0; background: transparent; color: #fff; font: inherit; font-size: 18px; font-weight: 500; outline: none; border-radius: 999px; }
+.sp-form input::placeholder { color: var(--fg-3); font-weight: 400; }
+.sp-form input::-webkit-search-cancel-button, .sp-form input::-webkit-search-decoration { display: none; -webkit-appearance: none; }
+.sp-clear { position: absolute; right: 12px; top: 50%; width: 40px; height: 40px; margin-top: -20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: rgba(255,255,255,.1); transition: background .18s, transform .18s var(--ease); }
+.sp-clear:hover { background: rgba(255,255,255,.22); }
+.sp-clear:active { transform: scale(.92); }
+.sp-clear .ic { width: 18px; height: 18px; }
+.sp-sub { min-height: 22px; margin: 18px 4px 14px; color: var(--fg-2); font-size: 15px; }
+.sp-sub strong { color: #fff; }
+.sp-sub .dim { color: var(--fg-3); }
+#spBody { transition: opacity .2s; }
+#spBody.is-loading { opacity: .45; pointer-events: none; }
+.sp-sec { margin-top: 26px; }
+.sp-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 820px; margin-bottom: 12px; }
+.sp-sec-head h2 { font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
+.link-btn { color: var(--fg-3); font-size: 14px; font-weight: 600; padding: 6px 10px; border-radius: 999px; transition: color .15s, background .15s; }
+.link-btn:hover { color: #fff; background: rgba(255,255,255,.08); }
+.chips.left { justify-content: flex-start; margin-top: 0; max-width: 820px; }
+.chip { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 16px; font-size: 14px; font-weight: 500; }
+.chip .ic { width: 15px; height: 15px; color: var(--fg-3); }
+.sp-hint { padding: 56px 0; place-items: start; text-align: left; }
+@media (max-width: 760px) {
+  .search-page { padding-top: calc(var(--nav-h) + 12px); }
+  .sp-form { height: 56px; }
+  .sp-form input { font-size: 16px; padding-left: 54px; }   /* 16px stops iOS zooming into the field */
+  .sp-ic { left: 18px; }
+}
+
+/* =====================================================================
+   PHASE 7 — cinematic hero fade
+   Cause of the old abrupt edge: the fade was a single ~250px strip (62% -> 100% of the hero) while the first rail
+   heading starts ~80px INSIDE the hero, so rail text sat on still-bright image and the picture seemed to stop at a line.
+   Now: (1) the art itself dissolves to transparent over the bottom ~55% with a smootherstep curve (no visible onset or
+   end), straight onto the page background, so no colour is ever mixed with a foreign grey; (2) a separate bg-tinted
+   scrim deepens the lower third for text legibility without darkening the upper image; (3) a feathered local scrim
+   sits behind the hero copy so it stays readable on bright art. Info-page hero uses the same recipe.
+   ===================================================================== */
+:root { --hero-fade: linear-gradient(180deg, #000 0%, #000 40%, rgba(0,0,0,1.0) 40.0%, rgba(0,0,0,0.997) 44.1%, rgba(0,0,0,0.977) 48.1%, rgba(0,0,0,0.931) 52.2%, rgba(0,0,0,0.855) 56.3%, rgba(0,0,0,0.754) 60.4%, rgba(0,0,0,0.632) 64.4%, rgba(0,0,0,0.5) 68.5%, rgba(0,0,0,0.368) 72.6%, rgba(0,0,0,0.246) 76.6%, rgba(0,0,0,0.145) 80.7%, rgba(0,0,0,0.069) 84.8%, rgba(0,0,0,0.023) 88.9%, rgba(0,0,0,0.003) 92.9%, rgba(0,0,0,0.0) 97.0%, transparent 100%); }
+.hero-art, .d-art { -webkit-mask-image: var(--hero-fade); mask-image: var(--hero-fade); }
+/* legibility scrims live on the slide, below the copy; the left scrim fades out with the same curve */
+.hero-slide::before { background:
+    linear-gradient(90deg, rgba(7,9,15,.92) 0%, rgba(7,9,15,.74) 18%, rgba(7,9,15,.38) 40%, rgba(7,9,15,.08) 62%, transparent 78%),
+    linear-gradient(180deg, rgba(7,9,15,.55) 0%, transparent 22%),
+    linear-gradient(180deg, transparent 30%, rgba(7,9,15,0.0) 30.0%, rgba(7,9,15,0.011) 35.8%, rgba(7,9,15,0.041) 41.7%, rgba(7,9,15,0.086) 47.5%, rgba(7,9,15,0.143) 53.3%, rgba(7,9,15,0.207) 59.2%, rgba(7,9,15,0.275) 65.0%, rgba(7,9,15,0.343) 70.8%, rgba(7,9,15,0.407) 76.7%, rgba(7,9,15,0.464) 82.5%, rgba(7,9,15,0.509) 88.3%, rgba(7,9,15,0.539) 94.2%, rgba(7,9,15,0.55) 100.0%); -webkit-mask-image: none; mask-image: none; }
+.d-hero::before { background:
+    linear-gradient(90deg, rgba(7,9,15,.92) 0%, rgba(7,9,15,.76) 18%, rgba(7,9,15,.4) 40%, transparent 68%),
+    linear-gradient(180deg, rgba(7,9,15,.55) 0%, transparent 22%),
+    linear-gradient(180deg, transparent 40%, rgba(7,9,15,0.0) 40.0%, rgba(7,9,15,0.01) 45.0%, rgba(7,9,15,0.037) 50.0%, rgba(7,9,15,0.078) 55.0%, rgba(7,9,15,0.13) 60.0%, rgba(7,9,15,0.188) 65.0%, rgba(7,9,15,0.25) 70.0%, rgba(7,9,15,0.312) 75.0%, rgba(7,9,15,0.37) 80.0%, rgba(7,9,15,0.422) 85.0%, rgba(7,9,15,0.463) 90.0%, rgba(7,9,15,0.49) 95.0%, rgba(7,9,15,0.5) 100.0%); -webkit-mask-image: none; mask-image: none; }
+.hero-content { isolation: isolate; }
+.hero-content::before { content: ""; position: absolute; z-index: -1; inset: -40px -90px -30px -70px; pointer-events: none;
+  background: radial-gradient(ellipse at 38% 50%, rgba(7,9,15,.5), rgba(7,9,15,.28) 45%, transparent 72%); }
+.hero-title, .hero-kicker, .hero-overview, .hero-meta { text-shadow: 0 1px 2px rgba(0,0,0,.35), 0 2px 24px rgba(0,0,0,.55); }
+/* the first rail starts after the image has fully dissolved */
+.rails { margin-top: clamp(-70px, -7vh, -30px); }
+
+/* the bottom scrim rises, then falls back to 0 BEFORE the hero's last pixel, so the hero's edge can never show as a line */
+.hero-slide::before { background:
+    linear-gradient(90deg, rgba(7,9,15,.92) 0%, rgba(7,9,15,.74) 18%, rgba(7,9,15,.38) 40%, rgba(7,9,15,.08) 62%, transparent 78%),
+    linear-gradient(180deg, rgba(7,9,15,.55) 0%, transparent 22%),
+    linear-gradient(180deg, transparent 30%, rgba(7,9,15,0.0) 30.0%, rgba(7,9,15,0.017) 34.9%, rgba(7,9,15,0.063) 39.8%, rgba(7,9,15,0.13) 44.7%, rgba(7,9,15,0.209) 49.6%, rgba(7,9,15,0.291) 54.4%, rgba(7,9,15,0.37) 59.3%, rgba(7,9,15,0.437) 64.2%, rgba(7,9,15,0.483) 69.1%, rgba(7,9,15,0.5) 74.0%, rgba(7,9,15,0.483) 76.9%, rgba(7,9,15,0.437) 79.8%, rgba(7,9,15,0.37) 82.7%, rgba(7,9,15,0.291) 85.6%, rgba(7,9,15,0.209) 88.4%, rgba(7,9,15,0.13) 91.3%, rgba(7,9,15,0.063) 94.2%, rgba(7,9,15,0.017) 97.1%, rgba(7,9,15,0.0) 100.0%); }
+.d-hero::before { background:
+    linear-gradient(90deg, rgba(7,9,15,.92) 0%, rgba(7,9,15,.76) 18%, rgba(7,9,15,.4) 40%, transparent 68%),
+    linear-gradient(180deg, rgba(7,9,15,.55) 0%, transparent 22%),
+    linear-gradient(180deg, transparent 40%, rgba(7,9,15,0.0) 40.0%, rgba(7,9,15,0.015) 44.2%, rgba(7,9,15,0.057) 48.4%, rgba(7,9,15,0.117) 52.7%, rgba(7,9,15,0.188) 56.9%, rgba(7,9,15,0.262) 61.1%, rgba(7,9,15,0.333) 65.3%, rgba(7,9,15,0.393) 69.6%, rgba(7,9,15,0.435) 73.8%, rgba(7,9,15,0.45) 78.0%, rgba(7,9,15,0.435) 80.4%, rgba(7,9,15,0.393) 82.9%, rgba(7,9,15,0.333) 85.3%, rgba(7,9,15,0.262) 87.8%, rgba(7,9,15,0.188) 90.2%, rgba(7,9,15,0.117) 92.7%, rgba(7,9,15,0.057) 95.1%, rgba(7,9,15,0.015) 97.6%, rgba(7,9,15,0.0) 100.0%); }
+
+/* phones: dots sit under the actions (not on them), My List collapses to an icon so the three actions fit one row */
+@media (max-width: 640px) {
+  .hero-content { bottom: 92px; gap: 14px; }
+  .hero-dots { left: var(--gutter); right: auto; bottom: 44px; }
+  .hero-actions { flex-wrap: nowrap; gap: 10px; }
+  .hero-actions .btn { height: 48px; padding: 0 20px; font-size: 15px; }
+  .hero-actions .list-btn { width: 48px; padding: 0; }
+  .hero-actions .list-btn span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .hero-content::before { inset: -40px -40px -30px -40px; background: radial-gradient(ellipse at 40% 55%, rgba(7,9,15,.62), rgba(7,9,15,.34) 55%, transparent 80%); }
+  .rails { margin-top: -30px; }
+}
+
+/* fix: the local text scrim and the clamped synopsis both produced faint rectangles (a gradient that didn't reach 0 at its box
+   edge, and a text-shadow blur clipped by overflow:hidden). Scrim now fades to 0 at its edges; synopsis uses a tight shadow. */
+.hero-content::before { background: radial-gradient(closest-side, rgba(7,9,15,.5), rgba(7,9,15,.3) 55%, transparent 100%); }
+.hero-overview { text-shadow: 0 1px 2px rgba(0,0,0,.55); }
+.d-overview { text-shadow: 0 1px 2px rgba(0,0,0,.55); }
+@media (max-width: 640px) {
+  .hero-content::before { background: radial-gradient(closest-side, rgba(7,9,15,.62), rgba(7,9,15,.36) 58%, transparent 100%); }
+}
+
+/* rails: "View all" */
+.rail-viewall { margin-left: auto; display: inline-flex; align-items: center; gap: 2px; height: 32px; padding: 0 8px 0 12px; border-radius: 999px; font-size: 14px; font-weight: 600; color: var(--fg-3); transition: color .2s, background .2s, gap .25s var(--ease); }
+.rail-viewall .ic { width: 16px; height: 16px; stroke-width: 2.2; }
+.rail-viewall:hover, .rail-viewall:focus-visible { color: #fff; background: rgba(255,255,255,.1); gap: 6px; }
+
+/* the full-height left scrim must also dissolve vertically, or the hero's bottom edge shows as a 4-level step */
+:root { --scrim-fade: linear-gradient(180deg, #000 0%, #000 55%, rgba(0,0,0,.92) 62%, rgba(0,0,0,.7) 71%, rgba(0,0,0,.4) 80%, rgba(0,0,0,.16) 89%, rgba(0,0,0,.04) 96%, transparent 100%); }
+.hero-slide::before, .d-hero::before { -webkit-mask-image: var(--scrim-fade); mask-image: var(--scrim-fade); }
+
+/* =====================================================================
+   PHASE 8 — My List page, nav additions, touch robustness, finishing touches
+   ===================================================================== */
+/* touch: no grey flash, no 300ms tap delay / double-tap zoom on anything pressable */
+a, button, [role="button"], [role="tab"], .card, .ccard, .ep, label, select { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+input, textarea { touch-action: manipulation; }
+html { scroll-padding-top: calc(var(--nav-h) + 12px); }
+/* hero / detail heights use the *small* viewport unit so phone browser bars can't make the page jump */
+.hero { height: min(88vh, 900px); height: min(88svh, 900px); }
+.d-hero { min-height: min(84vh, 820px); min-height: min(84svh, 820px); }
+@media (max-width: 640px) { .hero { height: min(80vh, 760px); height: min(80svh, 760px); } }
+main { min-height: 100vh; min-height: 100svh; }
+
+/* nav: My List tab (with count) + surprise button */
+.nav-links a { position: relative; }
+.nav-badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: rgba(255,255,255,.18); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; font-style: normal; }
+.nav-links a[aria-current="page"] .nav-badge { background: #000; color: #fff; }
+@media (max-width: 760px) { .nav-badge { position: absolute; top: -2px; right: -2px; min-width: 16px; height: 16px; font-size: 10px; line-height: 16px; background: #fff; color: #000; } .nav-links a[aria-current="page"] .nav-badge { background: #000; color: #fff; } }
+#surpriseBtn.spin .ic { animation: spinOnce .6s var(--ease); }
+@keyframes spinOnce { to { transform: rotate(360deg) scale(1.1); } }
+@media (max-width: 760px) { .nav { gap: 10px; } .nav-right { gap: 8px; } .nav-right .icon-btn { width: 40px; height: 40px; } .nav-links a { padding: 8px 12px; } }
+@media (max-width: 380px) { .brand-mark { width: 24px; height: 24px; } .nav-links a { padding: 8px 10px; } .nav-right .icon-btn { width: 38px; height: 38px; } }
+
+/* My List page */
+.list-page .page-title { font-size: clamp(30px, 4vw, 46px); font-weight: 750; letter-spacing: -.03em; }
+.seg { display: inline-flex; gap: 4px; padding: 4px; margin: 6px 0 24px; border-radius: 999px; background: rgba(255,255,255,.07); border: 1px solid var(--line); }
+.seg-btn { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 16px; border-radius: 999px; font-size: 14px; font-weight: 600; color: var(--fg-2); transition: background .2s, color .2s; }
+.seg-btn:hover { color: #fff; background: rgba(255,255,255,.08); }
+.seg-btn[aria-selected="true"] { background: #fff; color: #000; }
+.seg-n { font-size: 12px; font-weight: 700; opacity: .6; }
+.grid .card { transition: transform .35s var(--ease), box-shadow .35s var(--ease), opacity .26s ease; }
+.grid .card.leaving { opacity: 0; transform: scale(.92); pointer-events: none; }
+
+/* season pills show real names: allow longer labels, truncate neatly */
+.season-pill { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* finishing touches */
+.card:active, .ccard:active, .t10:active { transform: scale(.975); transition-duration: .12s; }
+.ep:active { transform: scale(.992); }
+@media (hover: none) {
+  .card:hover, .t10:hover, .ccard:hover { transform: none; }                /* no sticky hover lift after a tap */
+  .card .img-wrap, .cc-main > .img-wrap { box-shadow: 0 6px 18px rgba(0,0,0,.4), 0 0 0 1px var(--line); }
+  .rail-head h2 { font-size: 19px; }
+}
+.page-sub { min-height: 1.4em; }
+img { -webkit-user-drag: none; user-select: none; }
+@media (prefers-reduced-motion: reduce) { .grid .card.leaving, #surpriseBtn.spin .ic { animation: none; transition: none; } }
+
+/* labels collapse to icons on phones (the badge is now the last child, so target the label explicitly) */
+@media (max-width: 760px) { .nav-links a > span:nth-child(2) { display: none; } }
+/* the kicker has overflow:hidden, which clipped its wide text-shadow into a visible box: tight shadow only */
+.hero-kicker, .hero-meta, .meta-line { text-shadow: 0 1px 2px rgba(0,0,0,.5); }
