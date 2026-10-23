@@ -1,4 +1,4 @@
-// Run anywhere:  node test-hold.js    (needs the 'undici' package; run it inside your project folder)
+// Run from TMDB-Embed-API:  node scripts/debug/connection-pinning-test.js    (needs the 'undici' package)
 // Question: on YOUR network, which HTTP client can keep ONE connection (and so ONE public IP)?
 const https = require('https');
 let Agent; try { ({ Agent } = require('undici')); } catch (e) { console.log('undici not found - run this from your project folder'); }

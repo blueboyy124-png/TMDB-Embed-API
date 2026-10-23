@@ -2,9 +2,19 @@
 restart.trigger
 .vscode/
 .env
+# Local Supabase credentials. Copy the example; never commit the real file.
+public/streamer/supabase-config.js
 .DS_Store
 providers/.cache/
 .build/
 build/
 utils/*.corrupt-*
 /tmp_context
+.verify/
+logs/
+*.log
+dist/
+coverage/
+.idea/
+.fleet/
+*.swp

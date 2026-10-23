@@ -5,9 +5,7 @@ WORKDIR /app
 
 # Install only production dependencies first (leveraging cache)
 COPY package.json package-lock.json ./
-# Using npm install instead of npm ci because lock file appears out-of-sync
-# If you later regenerate lock (npm install locally) you can revert to npm ci for reproducibility
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 
 # Copy only required source (avoid sending screenshots, node_modules already installed)
 COPY apiServer.js ./

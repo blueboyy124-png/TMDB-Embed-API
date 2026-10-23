@@ -6,6 +6,7 @@ screenshots
 streams_cache
 providers/.cache
 utils/user-config.json
+public/streamer/supabase-config.js
 .env
 .git
 .gitignore
@@ -16,3 +17,9 @@ tests
 coverage
 .github
 docker-compose.yml
+macapp
+scripts/debug
+public/dev
+.verify
+logs
+test-*.js

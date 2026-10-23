@@ -90,6 +90,7 @@
     restart: ['', '<path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5M4.5 4v4.5H9"/>'],
     info: ['', '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/>'],
     cc: ['', '<rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="M10.4 10.3a2.5 2.5 0 1 0 0 3.4M17.2 10.3a2.5 2.5 0 1 0 0 3.4"/>'],
+    user: ['', '<circle cx="12" cy="8.5" r="3.7"/><path d="M4.8 20.2c.9-3.7 3.7-5.6 7.2-5.6s6.3 1.9 7.2 5.6"/>'],
     chevSel: ['', '<path d="M6 9l6 6 6-6"/>']
   };
   function icon(name, extra) {
@@ -147,11 +148,13 @@
     const all = getAllProgress();
     all[progressKey(entry.type, entry.id)] = entry;
     store.write(PROGRESS_KEY, all);
+    if (window.MacAccount) MacAccount.touch();
   }
   function dropProgress(type, id) {
     const all = getAllProgress();
     delete all[progressKey(type, id)];
     store.write(PROGRESS_KEY, all);
+    if (window.MacAccount) MacAccount.forget('progress', progressKey(type, id));
   }
   /* ---------- My List (kept on this device) ---------- */
   const LIST_KEY = 'macstream.list.v1';
@@ -179,6 +182,7 @@
     let on;
     if (all[key]) { delete all[key]; on = false; } else { all[key] = Object.assign({ addedAt: Date.now() }, item); on = true; }
     store.write(LIST_KEY, all);
+    if (window.MacAccount) { if (on) MacAccount.touch(); else MacAccount.forget('list', key); }
     document.querySelectorAll(`[data-list="${key}"]`).forEach((b) => {
       b.setAttribute('aria-pressed', String(on));
       b.setAttribute('aria-label', `${on ? 'Remove from' : 'Add to'} My List: ${item.title}`);
@@ -2295,18 +2299,15 @@
    * ===================================================================== */
   hydrateIcons();
   syncListBadge();
-  $('#surpriseBtn').addEventListener('click', async () => {
-    const btn = $('#surpriseBtn');
-    if (btn.dataset.busy) return; btn.dataset.busy = '1'; btn.classList.add('spin');
-    try {
-      const items = await getTrending();
-      const seen = getAllProgress(), saved = getList();
-      let pool = items.filter((i) => !seen[`${i.type}:${i.id}`] && !saved[`${i.type}:${i.id}`]);
-      if (!pool.length) pool = items;
-      if (pool.length) { const pick = pool[Math.floor(Math.random() * pool.length)]; location.hash = `#/title/${pick.type}/${pick.id}`; snack(`How about ${pick.title}?`); }
-    } catch (_) { snack('Couldn’t pick something right now'); }
-    finally { setTimeout(() => { btn.classList.remove('spin'); delete btn.dataset.busy; }, 500); }
-  });
+  if (window.MacAccount) {
+    MacAccount.init({ api: API, button: $('#acctBtn'), toast: snack });
+    // Another device changed something: refresh whatever is on screen, but never interrupt playback.
+    window.addEventListener('macstream:synced', (e) => {
+      clearStash(); syncListBadge();
+      const changed = (e.detail && e.detail.progress) || false;
+      if (changed && curKey === '/' && !(S && S.started)) route(true);
+    });
+  }
   syncVolumeUI();
   health.start();
   route(false);

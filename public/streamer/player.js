@@ -12,6 +12,12 @@
   const isSafari = /^((?!chrome|android|crios|fxios).)*(safari|applewebkit)/i.test(navigator.userAgent) &&
     (/Apple/i.test(navigator.vendor || '') || /iPad|iPhone|iPod/.test(navigator.userAgent));
 
+  // iPadOS reports itself as a Mac; touch points give it away. iPad Safari has MSE, so hls.js works there.
+  const isIPad = /iPad/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const NATIVE_STARVE_MS = 7000;      // native playback starved this long -> quietly reload at the same spot
+  const NATIVE_RESUME_MAX = 4;        // at most this many silent reloads ...
+  const NATIVE_RESUME_WINDOW_MS = 10 * 60 * 1000;   // ... per 10 minutes, then fall back to the stall offer
+
   const STALL_MIN_WAIT_MS = 8000;     // must be starved this long before we even look
   const STALL_WINDOW_MS = 20000;      // trailing window for the buffer-rate check
   const STALL_MIN_RATE = 0.35;        // < 0.35x real time == starved
@@ -51,6 +57,7 @@
       this.playedOnce = false;
       this.lastPos = 0;
       this.nativeRecoveries = 0;
+      this.silentResumes = [];
       this._tick = setInterval(() => this._checkStall(), 1000);
       ['waiting', 'stalled'].forEach((ev) => video.addEventListener(ev, () => this._markStarved()));
       ['playing', 'canplay', 'seeked'].forEach((ev) => video.addEventListener(ev, () => this._maybeRecovered()));
@@ -83,6 +90,7 @@
       this.url = url;
       this.hint = hlsHint;
       this._expiredSent = false;
+      this.silentResumes = [];
       this.usingNative = false;
       this.playedOnce = startAt > 0.5;
       this.lastPos = startAt || 0;
@@ -102,7 +110,7 @@
       const hlsJs = typeof window.Hls !== 'undefined' && window.Hls.isSupported();
       // Spec: native HLS when the browser says it can, else hls.js. Chrome/Android answer "maybe"
       // without a reliable pipeline, so only trust native on Safari (or when hls.js is unavailable).
-      const useNative = nativeHls && (isSafari || !hlsJs);
+      const useNative = nativeHls && ((isSafari && !isIPad) || !hlsJs);
 
       if (looksHls(url, hlsHint) && !useNative) {
         if (!hlsJs) { this.emit('fatal', { reason: 'hls-unsupported' }); return; }
@@ -308,6 +316,7 @@
       this.samples = this.samples.filter((s) => now - s.t <= STALL_WINDOW_MS);
 
       if (this.offerOpen) return;
+      if (this._silentResume(now)) return;
       if (this.offeredAt && now - this.offeredAt < STALL_COOLDOWN_MS) return;
       if (now - this.stalledSince < STALL_MIN_WAIT_MS) return;
 
@@ -322,6 +331,34 @@
       if (rate >= 1) return;
       this.offerOpen = true;
       this.emit('stall', { rate, frozen });
+    }
+
+    /**
+     * Native playback (Safari's own player: MP4 files, and HLS on iPhone) gives us no error when the server cuts the
+     * connection mid-file: the picture just starves for good until the page is reopened. Re-requesting the same URL at
+     * the same position is exactly what reopening does, so do it automatically after a short starve.
+     */
+    _silentResume(now) {
+      const v = this.video;
+      if (!this.usingNative || !this.url || !this.playedOnce) return false;
+      if (!this.stalledSince || now - this.stalledSince < NATIVE_STARVE_MS) return false;
+      if (v.seeking) return false;                                   // a seek the user just made is not a dead connection
+      if (this.linkStale && this.linkStale()) return false;          // old link: the app fetches a fresh one instead
+      this.silentResumes = this.silentResumes.filter((t) => now - t < NATIVE_RESUME_WINDOW_MS);
+      if (this.silentResumes.length >= NATIVE_RESUME_MAX) return false;
+      this.silentResumes.push(now);
+      const pos = (v.currentTime && isFinite(v.currentTime)) ? v.currentTime : this.lastPos;
+      const gen = this.generation, url = this.url;
+      this.stalledSince = now; this.samples = [];
+      this.emit('recovering', { attempt: this.silentResumes.length, position: pos, silent: true });
+      const onMeta = () => {
+        if (gen !== this.generation) return;
+        try { if (pos > 0) v.currentTime = pos; } catch (_) { /* continue from 0 */ }
+        v.play().catch(() => { });
+      };
+      v.addEventListener('loadedmetadata', onMeta, { once: true });
+      try { v.src = url; v.load(); } catch (_) { /* ignore */ }
+      return true;
     }
 
     destroy() {

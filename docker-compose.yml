@@ -1,4 +1,3 @@
-version: '3.9'
 services:
   tmdb-embed-api:
     build: .
@@ -15,17 +14,14 @@ services:
     ports:
       - "8787:8787"
     volumes:
-      # Persist runtime overrides (created by the admin UI)
-      - user_config_data:/app/utils/user-config.json
-      # Allow restart trigger file (optional; stored in container FS)
-      # - restart_marker:/app/restart.trigger
+      # Persist admin overrides. Bind-mount the files themselves: a named volume mounted at a
+      # file path is created as a directory and the config reader fails.
+      - ./utils/user-config.json:/app/utils/user-config.json
+      - ./utils/auth-users.json:/app/utils/auth-users.json
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://172.21.58.130:8787/api/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8787/api/health || exit 1"]
       interval: 30s
       timeout: 5s
       start_period: 20s
       retries: 3
-volumes:
-  user_config_data:
-  # restart_marker:

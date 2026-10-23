@@ -1,10 +1,10 @@
-// Run from your project root:  node test-anixo2.js
+// Run from TMDB-Embed-API:  node scripts/debug/anixo-connection-test.js
 // Unlike the first test, this runs the REAL anime provider in this same process and then fetches the
 // links it made over the SAME shared anixo connection -- exactly what your server does. It also logs
 // every time that connection is opened or closed, which is what decides whether the links can work.
 try { require('dotenv').config(); } catch (_) { /* optional */ }
-const { dispatcherFor } = require('./utils/anixoAgent');
-const { getAnimeStreams } = require('./providers/anime');
+const { dispatcherFor } = require('../../utils/anixoAgent');
+const { getAnimeStreams } = require('../../providers/anime');
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 const H = { 'User-Agent': UA, Referer: 'https://anixo.buzz/' };

@@ -48,10 +48,11 @@
     "string-similarity": "^4.0.4",
     "tough-cookie": "^5.1.2",
     "ttl-cache": "^1.0.2",
+    "undici": "^7.29.0",
     "yargs": "^17.7.2"
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=20.18.0"
   },
   "devDependencies": {
     "eslint": "^8.57.0",

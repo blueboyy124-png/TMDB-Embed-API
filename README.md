@@ -3,7 +3,7 @@
 > Modern, configurable streaming metadata + source aggregation API with a secure admin panel and multi-key TMDB rotation.
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Node.js-18%2B-brightgreen?style=flat" />
+  <img src="https://img.shields.io/badge/Node.js-20%2B-brightgreen?style=flat" />
   <img src="https://img.shields.io/badge/Status-Active-success?style=flat" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=flat" />
   <img src="https://img.shields.io/badge/Version-1.3.0-informational?style=flat" />
@@ -12,23 +12,10 @@
 
 ---
 
-## 📸 Screenshots
-<p align="center">
-  <img src="screenshots/Screenshot 2025-09-16 174931.png" width="46%" />
-  <img src="screenshots/Screenshot 2025-09-16 175002.png" width="46%" />
-</p>
-<p align="center">
-  <img src="screenshots/Screenshot 2025-09-16 175008.png" width="46%" />
-  <img src="screenshots/Screenshot 2025-09-16 175013.png" width="46%" />
-</p>
-<p align="center">
-  <img src="screenshots/Screenshot 2025-09-16 175020.png" width="46%" />
-  <img src="screenshots/Screenshot 2025-09-16 175026.png" width="46%" />
-</p>
-<p align="center">
-  <img src="screenshots/Screenshot 2025-09-16 175033.png" width="46%" />
-  <img src="screenshots/Screenshot 2025-09-16 175040.png" width="46%" />
-</p>
+## 🗂 Repository layout
+
+See **[docs/PROJECT-STRUCTURE.md](docs/PROJECT-STRUCTURE.md)** for a map of the server, providers,
+proxy, browser UI, macOS app, and verification scripts.
 
 ---
 
