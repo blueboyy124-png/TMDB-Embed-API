@@ -1464,14 +1464,37 @@
   }
 
   async function pollStreams(gen, why) {
+    // Check for cached streams first - if we have recent cached streams, use them
+    // to avoid the Showbox/FebBox API returning different streams due to region/cookie changes
+    const CACHE_KEY = 'macstream.streams.cache.v1';
+    const CACHE_TTL = 30000; // 30 seconds - short TTL to balance freshness with stability
+    const cached = read(CACHE_KEY, null);
+    const cacheAge = cached ? Date.now() - cached.at : Infinity;
+    
     try {
+      // If we have valid cached streams, use them instead of fetching fresh
+      if (cached && cacheAge < CACHE_TTL) {
+        console.log('[StreamCache] Using cached streams (age: ' + cacheAge + 'ms)');
+        ingestFinal(cached.data, gen);
+        return;
+      }
+      
       const d = await api(`/api/streams/${S.type}/${S.id}${epQuery()}`, { timeout: 45000 });
       if (!S || S.gen !== gen) return;
       ingestFinal(d, gen);
-    } catch (err) {
-      if (!S || S.gen !== gen) return;
       showLoader({ error: true, text: health.ok === false ? 'Can’t reach the MacStream API' : 'Couldn’t load streams', sub: health.ok === false ? 'Check that the API is running, then try again.' : 'Something went wrong while looking for sources.', actions: true });
       P.drawerSub.textContent = 'Couldn’t load streams';
+    } catch (e) {
+      console.error('[StreamCache] Error fetching streams:', e);
+      // If we have cached data even if expired, try to use it
+      const cached = read('macstream.streams.cache.v1', null);
+      if (cached) {
+        console.log('[StreamCache] Using expired cache after error');
+        ingestFinal(cached.data, gen);
+      } else {
+        showLoader({ error: true, text: 'Couldn\'t load streams', sub: 'Unable to fetch streams. Please try again.', actions: true });
+        P.drawerSub.textContent = 'Couldn\'t load streams';
+      }
     }
   }
 
