@@ -1485,6 +1485,7 @@
       S.animeSettled = true; S.animeWait = false; clearTimeout(S.animeTimer);
       renderDrawer(); hideSkip();
       if (!S.started && (S.payload || S.streams.length)) autoPick();
+      else if (S.started && !S.hasPlayed && S.extra.length) autoPick();   // anime arrived but English providers didn't play — try anime
       else if (S.started) { const n = S.extra.length; if (n) toast(`${n} anime source${n > 1 ? 's' : ''} found — open Streams to switch`, 3500); }
     };
     S.animeTimer = setTimeout(done, ANIME_MAX_WAIT_MS);
@@ -1569,7 +1570,7 @@
     if (!S || S.hasPlayed) return;
     clearTimeout(S.startTimer);
     const gen = S.gen, cur = S.activeStream;
-    if (cur && cur.provider === 'anime' && !S.retried.has(streamKey(cur)) && !S.recovering) {
+    if (cur && !S.retried.has(streamKey(cur)) && !S.recovering) {
       S.retried.add(streamKey(cur));
       showLoader({ text: 'Reconnecting to this source', sub: 'One quick retry before trying another' });
       const ok = await refreshActiveSource('startup-retry', { autoplay: true, auto: true, startup: true });
@@ -1695,7 +1696,7 @@
     const quiet = smoothNow() && (bufferedAhead() > 4);
     if (!quiet && !(o && o.startup)) { S.reconnecting = true; syncSpinner(); P.pStatus.textContent = 'Reconnecting…'; P.pStatus.hidden = false; }
     try {
-      const res = await freshMatch(prev, gen, (o && o.budget) || (o && o.startup ? 12000 : 40000));
+      const res = await freshMatch(prev, gen, (o && o.budget) || (o && o.startup ? 12000 : 15000));
       if (!S || S.gen !== gen) return true;
       if (!res) return false;
       applyFresh(res.fr, prev);
@@ -1722,6 +1723,9 @@
     }
     S.fatalPending = true;
     if (S.recovering) return;                                         // a reconnect is already under way: let it finish
+    // If the picture is still playing smoothly, a brief HLS/network blip is transient — ignore it.
+    // (HLS can play fine with under 4s buffered if it's actively refilling, so don't require that.)
+    if (smoothNow()) { S.fatalPending = false; return; }
     // A 5xx from the proxy/upstream is not an expired link: one fresh-link attempt is fair, a second can't help.
     if (info && info.status >= 500 && S.recoveries.some((t) => Date.now() - t < 120000)) { offerSwitch('This source is failing on the server'); return; }
     const ok = await refreshActiveSource(info && info.reason);

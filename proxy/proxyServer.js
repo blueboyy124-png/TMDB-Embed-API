@@ -56,14 +56,14 @@ const freshAgentFor = url => (String(url).startsWith('http://')
 //      socket being reused) becomes an error in seconds instead of a forever-spinner.
 //   3. The deadline clears the moment headers arrive, so long-running video streams are never
 //      killed by it; mid-stream stalls are handled separately by the body-idle watchdog below.
-const UPSTREAM_HEADER_TIMEOUT_MS = 15000;
+const UPSTREAM_HEADER_TIMEOUT_MS = 8000;
 // The player-facing routes try twice with different budgets. Attempt 1 usually lands on a
 // pooled socket and must fail fast — this network loses the FIN on origin-closed idle
 // connections, and a blackholed reuse would otherwise park the player for the full header
 // deadline (measured: 16s where a fresh socket answered in ~1.3s). Attempt 2 runs on a
 // fresh, non-pooled socket and gets the full budget.
-const UPSTREAM_FAST_RETRY_MS = 5000;
-const UPSTREAM_RETRY_TIMEOUT_MS = 10000;
+const UPSTREAM_FAST_RETRY_MS = 3000;
+const UPSTREAM_RETRY_TIMEOUT_MS = 6000;
 // Best-effort accelerators (HEAD size preflight, 0-0 probe, tail warm-up) get a short leash:
 // a healthy origin answers headers in ~1s, and stacking full-length deadlines on a dead host
 // made the total failure time four phases long. These only make startup snappier -- if they

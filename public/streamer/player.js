@@ -18,9 +18,9 @@
   const NATIVE_RESUME_MAX = 4;        // at most this many silent reloads ...
   const NATIVE_RESUME_WINDOW_MS = 10 * 60 * 1000;   // ... per 10 minutes, then fall back to the stall offer
 
-  const STALL_MIN_WAIT_MS = 8000;     // must be starved this long before we even look
+  const STALL_MIN_WAIT_MS = 12000;    // must be starved this long before we even look
   const STALL_WINDOW_MS = 20000;      // trailing window for the buffer-rate check
-  const STALL_MIN_RATE = 0.35;        // < 0.35x real time == starved
+  const STALL_MIN_RATE = 0.25;        // < 0.25x real time == starved
   const STALL_COOLDOWN_MS = 60000;    // after an offer, stay quiet for a while
 
   /** `hint` is the stream row's container when the API knows it (true = HLS, false = progressive). */
