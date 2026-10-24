@@ -3,46 +3,14 @@
 // Provides conditional route registration via enableProxy flag.
 
 const cors = require('cors');
-const nodeFetch = require('node-fetch');
 const { Readable } = require('stream');
-const http = require('http');
-const https = require('https');
+const { Agent } = require('undici');
 const { baseUrlFromRequest } = require('../utils/publicUrl');
 const { dispatcherFor, isAnixo, anixoFetch } = require('../utils/anixoAgent');
 
-// One shared, bounded connection pool per upstream scheme.
-//
-// Why this matters with more than one user: node-fetch used a fresh socket per request with keep-alive
-// effectively off, so N simultaneous viewers meant N concurrent sockets AND N full TLS handshakes. Past a
-// few dozen that is where a server starts failing its own users -- upstream hosts rate-limit the burst, local
-// ephemeral ports and file descriptors run out, and requests queue behind each other until they time out.
-// That presents as "the site got glitchy with a few people watching".
-//
-// The caps are generous for a household/small server but bounded, and maxSockets queues rather than refusing,
-// so a spike degrades into waiting instead of errors. `timeout` stops a dead upstream from holding a socket
-// forever. DISABLE_KEEPALIVE=true restores the old per-request behaviour.
-const KEEPALIVE = process.env.DISABLE_KEEPALIVE !== 'true';
-const MAX_SOCKETS = Number(process.env.PROXY_MAX_SOCKETS) || 64;
-// Short on purpose. Some origins (googleusercontent above all) close idle connections after a
-// few seconds — sometimes the FIN is lost on this network, leaving a half-dead socket the pool
-// still believes is alive. The next request that reuses it gets no response at all until the
-// header timeout kills it: measured as a 16s time-to-first-byte where a fresh socket answered
-// in ~1.3s. Reaping free sockets at 5s shrinks that poisoned window from ~15s to ~nothing;
-// reuse for back-to-back segment requests (the case keep-alive exists for) still works.
-const FREE_SOCKET_TIMEOUT_MS = 5000;
-// NOTE: deliberately NO `timeout` on the agents. An http.Agent's `timeout` only *emits* a
-// 'timeout' event; with nothing listening the request hangs indefinitely instead of failing.
-// Deadlines live per-request in `upstreamFetch` below, where they can actually abort.
-const agentOptions = { keepAlive: KEEPALIVE, maxSockets: MAX_SOCKETS, maxFreeSockets: 16, freeSocketTimeout: FREE_SOCKET_TIMEOUT_MS };
-const httpAgent = new http.Agent(agentOptions);
-const httpsAgent = new https.Agent(agentOptions);
-// node-fetch reads the agent per-request, so it is threaded through explicitly at each call site.
-const agentFor = url => (String(url).startsWith('http://') ? httpAgent : httpsAgent);
-// Last-resort agent for the player-facing retry: brand-new socket per request, so a wedged
-// pooled connection can never be the reason the retry fails too.
-const freshAgentFor = url => (String(url).startsWith('http://')
-    ? new http.Agent({ keepAlive: false })
-    : new https.Agent({ keepAlive: false }));
+// A retry gets its own dispatcher, guaranteeing a new connection instead of reusing a stale
+// socket from the global pool. It is closed when the response body is consumed or abandoned.
+const freshDispatcher = () => new Agent({ connections: 1, pipelining: 0 });
 
 // Upstream fetch hygiene. All three guards exist because a single hung or leaked upstream
 // request used to freeze video playback indefinitely (mpv waits on the proxy; the proxy waited
@@ -80,11 +48,18 @@ const UPSTREAM_BODY_IDLE_TIMEOUT_MS = Number(process.env.PROXY_BODY_IDLE_TIMEOUT
 // the node-fetch shape the call sites already use: ok/status/headers and text()/json()/arrayBuffer(),
 // plus a Node Readable `body` (undici hands back a web ReadableStream) so .pipe()/.on()/.destroy()
 // keep working unchanged.
-async function undiciCompatFetch(url, opts) {
+async function undiciCompatFetch(url, opts = {}) {
     // anixo ties its tokens to the client IP: it must ride the one kept-alive native socket (see utils/anixoAgent.js).
     if (isAnixo(url)) return anixoFetch(url, opts);
-    const dispatcher = dispatcherFor(url);
-    const resp = await fetch(url, dispatcher ? { ...opts, dispatcher } : opts);
+    const { dispatcher: requestedDispatcher, closeDispatcher: shouldCloseDispatcher = false, ...fetchOpts } = opts;
+    const dispatcher = requestedDispatcher || dispatcherFor(url);
+    const resp = await fetch(url, dispatcher ? { ...fetchOpts, dispatcher } : fetchOpts);
+    let dispatcherClosed = false;
+    const releaseDispatcher = () => {
+        if (!shouldCloseDispatcher || dispatcherClosed || !requestedDispatcher) return;
+        dispatcherClosed = true;
+        dispatcher.close().catch(() => {});
+    };
     let nodeBody;
     return {
         ok: resp.ok,
@@ -92,17 +67,20 @@ async function undiciCompatFetch(url, opts) {
         statusText: resp.statusText,
         url: resp.url,
         headers: resp.headers,
-        text: () => resp.text(),
-        json: () => resp.json(),
-        arrayBuffer: () => resp.arrayBuffer(),
+        text: () => resp.text().finally(releaseDispatcher),
+        json: () => resp.json().finally(releaseDispatcher),
+        arrayBuffer: () => resp.arrayBuffer().finally(releaseDispatcher),
         get body() {
-            if (nodeBody === undefined) nodeBody = resp.body ? Readable.fromWeb(resp.body) : null;
+            if (nodeBody === undefined) {
+                nodeBody = resp.body ? Readable.fromWeb(resp.body) : null;
+                if (nodeBody && requestedDispatcher) nodeBody.once('close', releaseDispatcher);
+            }
             return nodeBody;
         },
     };
 }
 
-function upstreamFetch(url, opts = {}, { res = null, timeoutMs = UPSTREAM_HEADER_TIMEOUT_MS, agent = null } = {}) {
+function upstreamFetch(url, opts = {}, { res = null, timeoutMs = UPSTREAM_HEADER_TIMEOUT_MS, dispatcher = null } = {}) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(new Error('upstream header timeout')), timeoutMs);
     let detach = () => {};
@@ -112,7 +90,7 @@ function upstreamFetch(url, opts = {}, { res = null, timeoutMs = UPSTREAM_HEADER
         res.on('close', onClose);
         detach = () => res.removeListener('close', onClose);
     }
-    const request = undiciCompatFetch(url, { ...opts, signal: ac.signal });
+    const request = undiciCompatFetch(url, { ...opts, signal: ac.signal, dispatcher, closeDispatcher: Boolean(dispatcher) });
     return request.finally(() => { clearTimeout(timer); detach(); });
 }
 
@@ -465,7 +443,7 @@ function createProxyRoutes(app) {
             } catch (firstErr) {
                 if (res.destroyed || res.headersSent || res.writableEnded) throw firstErr;
                 if (debug) console.log('[m3u8-proxy] upstream attempt failed, retrying fresh:', firstErr.message);
-                response = await upstreamFetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } }, { res, agent: freshAgentFor(targetUrl), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
+                response = await upstreamFetch(targetUrl, { headers: { 'User-Agent': DEFAULT_UA, ...headers } }, { res, dispatcher: freshDispatcher(), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
             }
             if (!response.ok) {
                 // A playlist request must never receive JSON: native HLS treats a non-playlist body as
@@ -707,7 +685,7 @@ function createProxyRoutes(app) {
             } catch (firstErr) {
                 if (res.destroyed || res.headersSent || res.writableEnded) throw firstErr;
                 if (debug) console.log('[ts-proxy] upstream attempt failed, retrying fresh:', firstErr.message);
-                resp = await upstreamFetch(targetUrl, upstreamOptions, { res, agent: freshAgentFor(targetUrl), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
+                resp = await upstreamFetch(targetUrl, upstreamOptions, { res, dispatcher: freshDispatcher(), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
             }
             if (!resp.ok && resp.status !== 206) {
                 // One more attempt on a fresh socket for transient upstream statuses. Mid-show these
@@ -719,7 +697,7 @@ function createProxyRoutes(app) {
                     try { resp.body && resp.body.destroy(); } catch (_e) { /* ignore */ }
                     await sleep(300);
                     try {
-                        resp = await upstreamFetch(targetUrl, upstreamOptions, { res, agent: freshAgentFor(targetUrl), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
+                        resp = await upstreamFetch(targetUrl, upstreamOptions, { res, dispatcher: freshDispatcher(), timeoutMs: UPSTREAM_RETRY_TIMEOUT_MS });
                     } catch (retryErr) {
                         if (debug) console.log('[ts-proxy] retry threw', retryErr.message);
                         resp = null;

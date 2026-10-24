@@ -735,7 +735,6 @@ async function aggregateStreams(req, res, onEvent) {
     // provider settles, so the win is realised the moment the last required provider reports.
     let signalEnough;
     const enoughPromise = new Promise(r => { signalEnough = r; });
-    const t0 = Date.now();
         // Emitted the instant each provider settles, so the client can render a growing list instead of
         // staring at nothing. No-op unless the caller asked for the live feed.
         const emit = (event, data) => { if (typeof onEvent === 'function') onEvent(event, data); };

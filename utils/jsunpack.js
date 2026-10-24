@@ -52,13 +52,13 @@ class JsUnpacker {
     }
 
     unpack() {
-        let js = this.packedJS;
+        const js = this.packedJS;
         try {
             const regex =
                 /}\s*\('(.*)',\s*(.*?),\s*(\d+),\s*'(.*?)'\.split\('\|'\)/s;
             const match = js.match(regex);
             if (match && match.length === 5) {
-                let payload = match[1].replace(/\\'/g, "'");
+                const payload = match[1].replace(/\\'/g, "'");
                 const radixStr = match[2];
                 const countStr = match[3];
                 const symtab = match[4].split('|');

@@ -1949,7 +1949,9 @@ const getStreamsFromTmdbId = async (tmdbType, tmdbId, seasonNum = null, episodeN
                 // Fetch sizes for PStream streams
                 if (pstreamStreams.length > 0) {
                     const sizePromises = pstreamStreams.map(async (stream) => {
-                        stream.size = await fetchStreamSize(stream.url);
+                        const probe = await fetchStreamProbe(stream.url);
+                        stream.size = probe.size;
+                        stream.linkDead = probe.dead;
                         return stream;
                     });
                     await Promise.all(sizePromises); // removed unused streamsWithSizes var
@@ -2035,13 +2037,6 @@ const getStreamsFromTmdbId = async (tmdbType, tmdbId, seasonNum = null, episodeN
                 if (directSources && directSources.length > 0) {
                     for (const source of directSources) {
                         const streamTitle = `${baseStreamTitle} - ${source.label}`;
-                        let key5FromDirectSource = null;
-                        try {
-                            const urlParams = new URLSearchParams(new URL(source.url).search);
-                            if (urlParams.has('KEY5')) {
-                                key5FromDirectSource = urlParams.get('KEY5');
-                            }
-                        } catch (e) { /* ignore if URL parsing fails */ }
                         streamsFromThisShareInfo.push({
                             name: streamTitle,
                             title: streamTitle,
@@ -2700,43 +2695,6 @@ const parseSizeToBytes = (sizeString) => {
         }
     }
     return Number.MAX_SAFE_INTEGER; // Fallback for unparsed strings
-};
-
-// Helper function to extract codec details from a string (filename/label)
-const extractCodecDetails = (text) => {
-    if (!text || typeof text !== 'string') return [];
-    const details = new Set();
-    const lowerText = text.toLowerCase();
-
-    // Video Codecs & Technologies
-    if (lowerText.includes('dolby vision') || lowerText.includes('dovi') || lowerText.includes('.dv.')) details.add('DV');
-    if (lowerText.includes('hdr10+') || lowerText.includes('hdr10plus')) details.add('HDR10+');
-    else if (lowerText.includes('hdr')) details.add('HDR'); // General HDR if not HDR10+
-    if (lowerText.includes('sdr')) details.add('SDR');
-
-    if (lowerText.includes('av1')) details.add('AV1');
-    else if (lowerText.includes('h265') || lowerText.includes('x265') || lowerText.includes('hevc')) details.add('H.265');
-    else if (lowerText.includes('h264') || lowerText.includes('x264') || lowerText.includes('avc')) details.add('H.264');
-
-    // Audio Codecs
-    if (lowerText.includes('atmos')) details.add('Atmos');
-    if (lowerText.includes('truehd') || lowerText.includes('true-hd')) details.add('TrueHD');
-    if (lowerText.includes('dts-hd ma') || lowerText.includes('dtshdma') || lowerText.includes('dts-hdhr')) details.add('DTS-HD MA');
-    else if (lowerText.includes('dts-hd')) details.add('DTS-HD'); // General DTS-HD if not MA/HR
-    else if (lowerText.includes('dts') && !lowerText.includes('dts-hd')) details.add('DTS'); // Plain DTS
-
-    if (lowerText.includes('eac3') || lowerText.includes('e-ac-3') || lowerText.includes('dd+') || lowerText.includes('ddplus')) details.add('EAC3');
-    else if (lowerText.includes('ac3') || (lowerText.includes('dd') && !lowerText.includes('dd+') && !lowerText.includes('ddp'))) details.add('AC3'); // Plain AC3/DD
-
-    if (lowerText.includes('aac')) details.add('AAC');
-    if (lowerText.includes('opus')) details.add('Opus');
-    if (lowerText.includes('mp3')) details.add('MP3');
-
-    // Bit depth (less common but useful)
-    if (lowerText.includes('10bit') || lowerText.includes('10-bit')) details.add('10-bit');
-    else if (lowerText.includes('8bit') || lowerText.includes('8-bit')) details.add('8-bit');
-
-    return Array.from(details);
 };
 
 // Utility function to sort streams by quality in order of resolution
