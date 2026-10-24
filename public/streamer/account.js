@@ -22,7 +22,7 @@
   const KEYS = { progress: 'macstream.progress.v1', list: 'macstream.list.v1' };
   const TOMB_MS = 60 * 24 * 3600 * 1000;
   const MAX_ITEMS = 600;
-  const SYNC_EVERY_MS = 90 * 1000;
+  const SYNC_EVERY_MS = 2000;
   const KEEPALIVE_MAX = 60000;                       // browsers cap keepalive bodies at 64 KB
 
   const CFG = window.MACSTREAM_SUPABASE || {};
@@ -38,7 +38,7 @@
   let session = read(SESSION_KEY, null);             // { access_token, refresh_token, expires_at, user_id, email }
   if (!session || !session.access_token || !session.refresh_token || !session.user_id) session = null;
   let status = { state: 'idle', at: 0, msg: '' };    // idle | syncing | ok | error
-  let dirty = false, running = null, rerun = false, timer = null, firstTouch = 0;
+  let dirty = false, running = null, rerun = false, timer = null;
   let known = null;                                  // { data, version } as last seen on the server
 
   /* ---------- local data + merge (same rules as the server) ---------- */
@@ -192,10 +192,9 @@
   function touch() {
     if (!session) return;
     dirty = true;
-    if (!firstTouch) firstTouch = Date.now();
     clearTimeout(timer);
-    // wait for a quiet moment, but never hold a change back for more than 30 s (progress is saved every 5 s while playing)
-    timer = setTimeout(() => sync(), Math.min(4000, Math.max(0, 30000 - (Date.now() - firstTouch))));
+    // Save progress every 2 seconds during playback for real-time cross-device sync
+    timer = setTimeout(() => sync(), 2000);
   }
 
   const tombSig = (s, c) => Object.keys(s.tomb[c]).sort().map((k) => k + '@' + s.tomb[c][k]).join('|');
@@ -249,7 +248,7 @@
         const merged = await pushPull();
         if (!session || session.user_id !== mine) return false;
         applyRemote(merged);
-        dirty = false; firstTouch = 0;
+        dirty = false;
         setStatus({ state: 'ok', at: Date.now() });
         return true;
       } catch (err) {

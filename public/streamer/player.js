@@ -69,6 +69,8 @@
         const t = video.currentTime || 0;
         if (t > 0.5 || video.readyState >= 2) this.lastPos = t;
         if (this.lastPos > 0.5) this.playedOnce = true;
+        // Save progress every few seconds for cross-device sync (like Netflix/Disney+)
+        if (window.MacAccount) MacAccount.touch();
       });
       video.addEventListener('error', () => this._onNativeError());
     }
