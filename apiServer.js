@@ -9,6 +9,8 @@ const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
 const os = require('os');
+const fs = require('fs').promises;
+const crypto = require('crypto');
 const { config, saveConfigPatch, OVERRIDE_PATH, overrideStatus } = require('./utils/config');
 const { authenticate, issueSession, requireAuth, getSession, updatePassword } = require('./utils/auth');
 const path = require('path');
@@ -24,6 +26,44 @@ const linkHealth = require('./utils/linkHealth');
 const { baseUrlFromRequest } = require('./utils/publicUrl');
 
 const app = express();
+
+// Desktop UI sync is intentionally read-only and separate from the browser UI. The macOS
+// wrapper uses this manifest to mirror public/streamer into its private Application Support
+// cache; regular website visitors never request it and no desktop-specific markup is served
+// from the normal streamer routes.
+const STREAMER_PUBLIC_DIR = path.join(process.cwd(), 'public', 'streamer');
+let streamerManifestCache = { createdAt: 0, value: null };
+const STREAMER_MANIFEST_TTL_MS = 2000;
+
+async function listStreamerAssets(dir, prefix = '') {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue;
+    const relative = path.posix.join(prefix, entry.name);
+    const absolute = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await listStreamerAssets(absolute, relative));
+    } else if (entry.isFile()) {
+      const data = await fs.readFile(absolute);
+      files.push({ path: relative, bytes: data.byteLength, sha256: crypto.createHash('sha256').update(data).digest('hex') });
+    }
+  }
+  return files;
+}
+
+async function streamerManifest() {
+  const now = Date.now();
+  if (streamerManifestCache.value && now - streamerManifestCache.createdAt < STREAMER_MANIFEST_TTL_MS) {
+    return streamerManifestCache.value;
+  }
+  const assets = await listStreamerAssets(STREAMER_PUBLIC_DIR);
+  assets.sort((a, b) => a.path.localeCompare(b.path));
+  const version = crypto.createHash('sha256').update(JSON.stringify(assets)).digest('hex');
+  const value = { version, assets };
+  streamerManifestCache = { createdAt: now, value };
+  return value;
+}
 
 // Trust the edge that put us here. `1` (trust one hop) is right for a single reverse proxy / platform edge
 // and matches the previous hardcoded value, but it is wrong for a chain of them and unnecessary when the
@@ -293,6 +333,18 @@ app.use((req,res,next)=>{ metrics.requestsTotal++; metrics.lastRequestAt = Date.
 // to forget on an error or a timeout. Mounted before static so nothing below can be missed.
 app.use((req, res, next) => {
   runWithRequestContext(() => next());
+});
+
+// Private-to-the-desktop-client metadata for one-way UI syncing. This lists the exact static
+// streamer files already served below; it never changes what /streamer serves to browsers.
+app.get('/api/desktop-ui/manifest', async (_req, res) => {
+  try {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, ...(await streamerManifest()) });
+  } catch (error) {
+    console.error('[desktop-ui] manifest failed:', error.message);
+    res.status(500).json({ success: false, error: 'DESKTOP_UI_MANIFEST_FAILED' });
+  }
 });
 
 // Serve static UI (login page at /)
