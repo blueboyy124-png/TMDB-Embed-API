@@ -1296,7 +1296,7 @@
     document.body.classList.toggle('player-full', mode === 'full' && !playerEl.hidden);
     if (mode === 'mini' && document.fullscreenElement) document.exitFullscreen().catch(() => { });
     if (mode === 'full') { pip.exit(); bumpControls(); }
-    else if (mode === 'mini' && prev !== 'mini') pip.enter(true);      // quiet: falls back to the in-page mini player
+    else if (mode === 'mini' && prev !== 'mini') { pip.enter(true); saveNow(true); }   // save position before shrinking to mini
   }
 
   /** Until the first frame, only Streams (and Back/Close) are available: nothing to seek, skip or change mid-load. */
@@ -1544,7 +1544,7 @@
     activate(best, { startAt: S.startAt, autoplay: true, auto: true });
   }
 
-  const STARTUP_TIMEOUT_MS = 25000;
+  const STARTUP_TIMEOUT_MS = 10000;
   function activate(stream, o) {
     clearTimeout(S.startTimer);
     S.activeUrl = stream.url; S.started = true; S.upnextDismissed = false;
@@ -1553,7 +1553,7 @@
     S.autoPicked = !!o.auto; S.userPicked = !!o.manual;
     P.pBigPlay.hidden = true; P.stall.hidden = true;
     S.loadingSrc = true; clearTimeout(S.loadWatch);
-    { const g = S.gen; S.loadWatch = setTimeout(() => { if (S && S.gen === g && S.loadingSrc && S.hasPlayed) { S.loadingSrc = false; syncSpinner(); if (video.readyState < 2) offerSwitch('This stream is taking too long'); } }, 30000); }
+    { const g = S.gen; S.loadWatch = setTimeout(() => { if (S && S.gen === g && S.loadingSrc && S.hasPlayed) { S.loadingSrc = false; syncSpinner(); if (video.readyState < 2) offerSwitch('This stream is taking too long'); } }, 10000); }
     if (!S.hasPlayed) showLoader({ text: 'Starting playback', sub: `${stream.quality && String(stream.quality).toUpperCase() !== 'AUTO' ? stream.quality + ' · ' : ''}${stream.provider || ''}`.replace(/ · $/, '') });
     else syncSpinner();
     caps.reset();
@@ -1729,7 +1729,11 @@
     // A 5xx from the proxy/upstream is not an expired link: one fresh-link attempt is fair, a second can't help.
     if (info && info.status >= 500 && S.recoveries.some((t) => Date.now() - t < 120000)) { offerSwitch('This source is failing on the server'); return; }
     const ok = await refreshActiveSource(info && info.reason);
-    if (!ok && S) { S.fatalPending = true; offerSwitch('This stream stopped working'); }
+    if (!ok && S) { S.fatalPending = true;
+      // Auto-switch to the next untried source instead of making the user pick.
+      const next = rankStreams(S.streams).find((r) => !S.tried.has(r.url) && !S.triedKeys.has(streamKey(r)));
+      if (next) { S.failovers++; activate(next, { startAt: S.startAt, autoplay: true, auto: true }); return; }
+      offerSwitch('This stream stopped working'); }
   }
 
   /** Manual override: switch source and keep the current position. */
@@ -1934,7 +1938,17 @@
     S.loadingSrc = false; S.reconnecting = false; setSpinner(false);
     bumpControls();
   }
-  mp.on('stall', () => { if (S && (S.recovering || wakeBusy)) return; offerSwitch('Playback looks stuck'); });   // we're already putting it back
+  mp.on('stall', () => { 
+    if (S && (S.recovering || wakeBusy)) return; 
+    if (S && S.autoPicked && S.hasPlayed) {
+      // Auto-switch to the next source instead of making the user pick.
+      const next = rankStreams(S.streams).find((r) => !S.tried.has(r.url) && !S.triedKeys.has(streamKey(r)));
+      if (next) { S.failovers++; P.stall.hidden = true; activate(next, { startAt: S.startAt, autoplay: true, auto: true }); return; }
+      offerSwitch('Playback looks stuck'); 
+    } else {
+      offerSwitch('Playback looks stuck'); 
+    }
+  });
   mp.on('fatal', (info) => handleFatal(info));
   mp.on('stallclear', () => { P.stall.hidden = true; });
   mp.on('blocked', () => { setSpinner(false); P.pBigPlay.hidden = false; });
@@ -2161,6 +2175,14 @@
   }
   window.addEventListener('pagehide', () => saveNow(true));
   document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(true); });
+  // Periodic save while playing so position isn't lost if the tab is closed without pagehide/visibilitychange.
+  let progressTimer = null;
+  video.addEventListener('playing', () => {
+    if (progressTimer) clearInterval(progressTimer);
+    progressTimer = setInterval(() => saveNow(false), 5000);
+  });
+  video.addEventListener('pause', () => { if (progressTimer) { clearInterval(progressTimer); progressTimer = null; saveNow(true); } });
+  video.addEventListener('ended', () => { if (progressTimer) { clearInterval(progressTimer); progressTimer = null; saveNow(true); } });
 
   function onFinished() {
     if (!S || S.finished) return;

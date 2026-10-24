@@ -114,7 +114,7 @@
 
       if (looksHls(url, hlsHint) && !useNative) {
         if (!hlsJs) { this.emit('fatal', { reason: 'hls-unsupported' }); return; }
-        const hls = new window.Hls({ enableWorker: true, lowLatencyMode: false, maxBufferLength: 60, backBufferLength: 30 });
+        const hls = new window.Hls({ enableWorker: true, lowLatencyMode: false, maxBufferLength: 120, backBufferLength: 60 });
         this.hls = hls;
         hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
           if (gen !== this.generation) return;
