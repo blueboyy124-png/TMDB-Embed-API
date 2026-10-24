@@ -1476,7 +1476,7 @@
   }
 
   /* ---- anime: the combined route often leaves before the (slow, ~20s+) anime provider answers ---- */
-  const ANIME_MAX_WAIT_MS = 30000;
+  const ANIME_MAX_WAIT_MS = 15000;
   function startAnimeFetch(gen) {
     if (!S || S.gen !== gen || S.animeWait || S.animeSettled) return;
     S.animeWait = true;
